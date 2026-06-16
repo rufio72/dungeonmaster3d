@@ -63,7 +63,7 @@ walltex = LoadTexture("test.png")
 ; NB: niente piu' cuboni giganti per floor/ceiling (questo motore non li
 ;     renderizzava): pavimento e soffitto sono piastrelle costruite nel loop.
 ceiltex  = LoadTexture("soffitto.png")
-floortex = LoadTexture("pavimento2.png")
+floortex = LoadTexture("pavi_3.png")
 
 ; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
 For y = 0 To H-1

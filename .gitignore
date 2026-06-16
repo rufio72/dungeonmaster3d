@@ -1,0 +1,64 @@
+# ===========================================================================
+# Repo del lavoro "Dungeon Master 3D / ponte" (Fase 0 + Fase 1).
+# Contiene SOLO il codice scritto da noi e i file CSBwin che abbiamo modificato.
+#
+# ESCLUSO di proposito (materiale di terzi / protetto / generato):
+#  - dati di gioco FTL/Software Heaven (dungeon.dat, graphics.dat, hint, ...)
+#  - archivi e pacchetti scaricati
+#  - sorgenti/giochi di terzi non modificati
+#  - binari compilati e librerie
+#  - texture/screenshot derivati dall'arte del gioco
+#  - output runtime del ponte
+# ===========================================================================
+
+# --- dati di gioco protetti (MAI committare) ---
+*.dat
+*.hct
+*.DAT
+*.PAK*
+*.BIN
+*.IMG
+*.PRG
+*.TTP
+
+# --- archivi e download ---
+*.7z
+*.rar
+*.tgz
+*.zip
+*.gz
+downloads/
+
+# --- sorgenti / giochi di terzi non toccati da noi ---
+ReDMCSB/
+csb/CSBwin12_3Source/
+csb/CSBwin_SRC_20160923/
+csb/Tool-CSBuild251Src/
+csb/CSBuild291Source/
+csb/*.html
+csb/*_files/
+
+# --- binari compilati, oggetti, librerie ---
+*.o
+*.so
+*.so.*
+*.exe
+*.a
+csb/CSBwin_SRC_20190702/src/CSB/
+play_DungeonMaster/CSBwin
+play_DungeonMaster/dm3d
+play_DungeonMaster/dm3d.c
+play_DungeonMaster/libSDL2-2.0.so.0
+
+# --- texture/screenshot derivati dall'arte del gioco ---
+play_DungeonMaster/dm_*.png
+play_DungeonMaster/dm_*.bmp
+
+# --- output runtime del ponte ---
+play_DungeonMaster/dm_state.txt
+play_DungeonMaster/dm_world_state.json
+play_DungeonMaster/dm_level_*.txt
+play_DungeonMaster/dm_level_*.json
+
+# --- config affiancato ai dati di gioco ---
+play_DungeonMaster/config.linux

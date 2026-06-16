@@ -49,7 +49,7 @@ CameraClsColor camera, 0, 0, 0
 ; nebbia nera: piu' lontano = piu' scuro, fino al nero (look "buio" di DM)
 CameraFogMode camera, 1
 CameraFogColor camera, 0, 0, 0
-CameraFogRange camera, CELL*1.0, CELL*4.5
+CameraFogRange camera, CELL*0.5, CELL*3.0
 
 light = CreateLight()
 RotateEntity light, 50, 60, 0

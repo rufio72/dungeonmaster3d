@@ -22,6 +22,9 @@ Dettagli completi: vedi **`ANALISI_DUNGEON_MASTER.md`**.
   (alsa/pulse/pipewire), affiancata all'eseguibile.
 - **Sorgenti CSBwin completi**: scaricabili a parte; qui ci sono solo i file
   modificati. Binari, archivi, texture derivate e output runtime sono esclusi.
+- **Texture muri** `play_DungeonMaster/test.png`: asset esterno fornito
+  dall'utente (licenza propria). Il visualizzatore la carica per nome; metti la
+  tua texture di pietra con quel nome nella cartella.
 
 ## Build & run (riassunto)
 ```bash

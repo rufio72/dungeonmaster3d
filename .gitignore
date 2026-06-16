@@ -54,6 +54,9 @@ play_DungeonMaster/libSDL2-2.0.so.0
 play_DungeonMaster/dm_*.png
 play_DungeonMaster/dm_*.bmp
 
+# --- texture muri fornita dall'utente (licenza esterna, non ridistribuita) ---
+play_DungeonMaster/test.png
+
 # --- output runtime del ponte ---
 play_DungeonMaster/dm_state.txt
 play_DungeonMaster/dm_world_state.json

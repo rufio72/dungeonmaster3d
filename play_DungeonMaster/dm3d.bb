@@ -53,43 +53,66 @@ CameraFogRange camera, CELL*1.0, CELL*4.5
 
 light = CreateLight()
 RotateEntity light, 50, 60, 0
+; luce ambientale: senza, le superfici rivolte via dalla luce (es. la faccia
+; inferiore del soffitto) restano nere. Cosi' tutto riceve una base di luce.
+AmbientLight 120, 120, 120
 
 ; texture muri
 walltex = LoadTexture("test.png")
+; texture soffitto e pavimento (una piastrella per cella -> mapping di default).
+; NB: niente piu' cuboni giganti per floor/ceiling (questo motore non li
+;     renderizzava): pavimento e soffitto sono piastrelle costruite nel loop.
+ceiltex  = LoadTexture("soffitto.png")
+floortex = LoadTexture("pavimento2.png")
 
-; pavimento (un cubo appiattito che copre tutto il livello) - grigio scuro
-floor = CreateCube()
-ScaleEntity floor, W*CELL/2.0, 0.2, H*CELL/2.0
-PositionEntity floor, (W-1)*CELL/2.0, -0.2, (H-1)*CELL/2.0
-EntityColor floor, 50, 50, 50
-
-; soffitto (cubo appiattito sopra i muri, alti CELL) - grigio scuro
-ceil = CreateCube()
-ScaleEntity ceil, W*CELL/2.0, 0.2, H*CELL/2.0
-PositionEntity ceil, (W-1)*CELL/2.0, CELL+0.2, (H-1)*CELL/2.0
-EntityColor ceil, 50, 50, 50
-
-; muri: un cubo per ogni cella di tipo 0 (wall)
+; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
 For y = 0 To H-1
 	row$ = grid$(y)
 	For x = 0 To W-1
 		c$ = Mid$(row$, x+1, 1)
+		wx# = (W-1-x)*CELL
+		wz# = y*CELL
 		If c$ = "0" Then
+			; muro (cubo alto 0..CELL)
 			wall = CreateCube()
 			ScaleEntity wall, CELL/2.0, CELL/2.0, CELL/2.0
-			PositionEntity wall, (W-1-x)*CELL, CELL/2.0, y*CELL
+			PositionEntity wall, wx, CELL/2.0, wz
 			EntityColor wall, 255, 255, 255
 			If walltex <> 0 Then EntityTexture wall, walltex
-		Else If c$ = "4" Then          ; porta
-			dr = CreateCube()
-			ScaleEntity dr, CELL/2.0, CELL/2.0, 0.2
-			PositionEntity dr, (W-1-x)*CELL, CELL/2.0, y*CELL
-			EntityColor dr, 110, 80, 40
-		Else If c$ = "3" Then          ; scale (marker)
-			st = CreateCube()
-			ScaleEntity st, CELL/3.0, 0.3, CELL/3.0
-			PositionEntity st, (W-1-x)*CELL, 0.3, y*CELL
-			EntityColor st, 200, 200, 60
+		Else
+			; cella calpestabile: piastrella pavimento (y=0) + soffitto (y=CELL)
+			ft = CreateCube()
+			ScaleEntity ft, CELL/2.0, 0.1, CELL/2.0
+			PositionEntity ft, wx, 0.0, wz
+			If floortex <> 0 Then
+				EntityColor ft, 255, 255, 255
+				EntityTexture ft, floortex
+			Else
+				EntityColor ft, 60, 60, 60
+			EndIf
+
+			ct = CreateCube()
+			ScaleEntity ct, CELL/2.0, 0.1, CELL/2.0
+			PositionEntity ct, wx, CELL, wz
+			If ceiltex <> 0 Then
+				EntityColor ct, 100, 100, 100   ; tinta scura: soffitto piu' buio
+				EntityTexture ct, ceiltex
+			Else
+				EntityColor ct, 40, 40, 40
+			EndIf
+
+			; marker porta / scale sopra la piastrella
+			If c$ = "4" Then
+				dr = CreateCube()
+				ScaleEntity dr, CELL/2.0, CELL/2.0, 0.2
+				PositionEntity dr, wx, CELL/2.0, wz
+				EntityColor dr, 110, 80, 40
+			Else If c$ = "3" Then
+				st = CreateCube()
+				ScaleEntity st, CELL/3.0, 0.3, CELL/3.0
+				PositionEntity st, wx, 0.6, wz
+				EntityColor st, 200, 200, 60
+			EndIf
 		EndIf
 	Next
 Next

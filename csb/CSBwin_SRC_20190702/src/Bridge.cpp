@@ -23,6 +23,66 @@
 #include "Data.h"
 
 #include <cstdio>
+#include <sys/stat.h>
+
+// ---- estrazione ritratti campioni ----------------------------------------
+// I ritratti NON sono in un file grafico: sono incorporati nel record del
+// personaggio (CHARDESC.portrait), 32x28 pixel a 4 bit (16 byte/riga, 28 righe),
+// colori dalla palette ST a 16 voci. Qui esportiamo i ritratti dei 4 campioni
+// attivi del party (d.CH16482[]) come PPM (poi convertibili in PNG).
+static void STtoRGB(int c, int *r, int *g, int *b)
+{
+  // palette Atari ST: 0x0RGB, 3 bit per canale
+  *r = ((c >> 8) & 7) * 255 / 7;
+  *g = ((c >> 4) & 7) * 255 / 7;
+  *b = ((c >> 0) & 7) * 255 / 7;
+}
+
+// Tutti e 24 i ritratti dei campioni stanno nella grafica numero 26 (atlante
+// 8 colonne x 3 righe, ogni cella 32x29), in formato 4-bit CHUNKY (2 px/byte).
+// Vedi AddCharacter(): copia da GetBasicGraphicAddress(26) con offset
+// (charID%8)*32 , (charID/8)*29. Dumpiamo l'atlante grezzo + palette; lo
+// slicing in 24 PNG lo fa lo script Python.
+static int Bridge_ExportPortraits(void)
+{
+  mkdir("portraits", 0755);
+
+  // dimensioni dall'header non-espanso della grafica 26
+  ui8 *unexp = (ui8 *)d.ppUnExpandedGraphics[26];
+  if (unexp == NULL) return 0;
+  int aw = (int)(ui16)LE16(*(i16 *)unexp);
+  int ah = (int)(ui16)LE16(*(i16 *)(unexp + 2));
+  if (aw <= 0 || ah <= 0 || aw > 2048 || ah > 2048) return 0;
+  int stride = ((aw + 15) & ~15) / 2;          // byte/riga (4-bit, 2px/byte)
+
+  ui8 *atlas = (ui8 *)GetBasicGraphicAddress(26);
+  if (atlas == NULL) return 0;
+
+  FILE *f = fopen("portraits/atlas26.raw", "wb");
+  if (f == NULL) return 0;
+  fwrite(atlas, 1, (size_t)stride * ah, f);
+  fclose(f);
+
+  FILE *h = fopen("portraits/atlas26.txt", "w");
+  if (h != NULL) { fprintf(h, "%d %d %d\n", aw, ah, stride); fclose(h); }
+
+  // palette ST corrente -> 16 righe "r g b"
+  FILE *pf = fopen("portraits/palette.txt", "w");
+  if (pf != NULL)
+  {
+    for (int i = 0; i < 16; i++)
+    {
+      int r, g, b; STtoRGB((int)d.Palette11946.color[i], &r, &g, &b);
+      fprintf(pf, "%d %d %d\n", r, g, b);
+    }
+    fclose(pf);
+  }
+
+  printf("[bridge] atlante ritratti (graphic 26): %dx%d stride=%d -> portraits/\n",
+         aw, ah, stride);
+  fflush(stdout);
+  return 1;
+}
 
 // ---- etichette leggibili -------------------------------------------------
 
@@ -326,6 +386,11 @@ void Bridge_Tick(void)
   if (d.LoadedLevel < 0) return;
   if (d.LevelCellFlags == NULL || d.width <= 0 || d.height <= 0) return;
   if (d.pCurrentLevelObjectIndex == NULL) return;
+
+  // Esporta i ritratti dei campioni una volta (qui graphics.dat e' caricato).
+  // Ritenta finche' non ne salva almeno uno.
+  static bool portraitsDone = false;
+  if (!portraitsDone && Bridge_ExportPortraits() > 0) portraitsDone = true;
 
   static int prevLevel = -999, prevX = -1, prevY = -1, prevFacing = -1;
   static int lastDumpTime = -1000;

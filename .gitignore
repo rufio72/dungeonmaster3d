@@ -69,3 +69,6 @@ play_DungeonMaster/dm_level_*.json
 
 # --- config affiancato ai dati di gioco ---
 play_DungeonMaster/config.linux
+
+# --- ritratti estratti (arte del gioco, derivata) ---
+play_DungeonMaster/portraits/

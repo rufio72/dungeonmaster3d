@@ -14,6 +14,10 @@ Const CELL# = 4.0          ; unita' 3D per cella della griglia
 Const EYE#  = 2.0          ; altezza occhi camera
 Const SMOOTH# = 0.3        ; fattore di interpolazione camera (0..1): piu' alto = piu' rapido
 
+Const NPORT = 24           ; ritratti dei campioni: portraits/00.png .. portraits/23.png
+Const PORT_W# = CELL*0.55  ; larghezza/altezza del quadro appeso al muro
+Const PORT_T# = 0.10       ; spessore della tavola (sottile)
+
 ; ----------------------------------------- attende la mappa (entra nel dungeon)
 W = 0 : H = 0
 While W <= 0 Or H <= 0
@@ -41,6 +45,13 @@ While W <= 0 Or H <= 0
 		Delay 300
 	EndIf
 Wend
+
+; finestra subito visibile: le 24 texture dei ritratti (1024x1024) richiedono
+; qualche secondo, quindi mostriamo una schermata di caricamento invece del nero.
+Cls
+Color 200, 200, 200
+Text 20, 210, "Caricamento dungeon..."
+Flip
 
 ; ---------------------------------------------------------------- mondo 3D
 camera = CreateCamera()
@@ -116,6 +127,67 @@ For y = 0 To H-1
 		EndIf
 	Next
 Next
+
+; ---------------------------------------------------- ritratti dei campioni
+; Texture dei 24 campioni (immagini rifatte: portraits/00.png .. 23.png).
+; ScaleTexture .,1,-1 corregge il flip verticale (origine immagine top-left
+; vs OpenGL bottom-left): senza, i volti uscivano sottosopra.
+Dim porttex(NPORT-1)
+For i = 0 To NPORT-1
+	; avanzamento visibile mentre carichiamo (il decode di 24 PNG e' lento)
+	Cls
+	Color 200, 200, 200
+	Text 20, 200, "Caricamento ritratti  " + (i+1) + "/" + NPORT
+	Color 80, 80, 80   : Rect 20, 222, 600, 12, 1
+	Color 120, 200, 120 : Rect 20, 222, (i+1)*600/NPORT, 12, 1
+	Flip
+	n$ = Right$("0" + Str$(i), 2)            ; 0->"00", 5->"05", 23->"23"
+	porttex(i) = LoadTexture("portraits/" + n$ + ".png")
+	If porttex(i) <> 0 Then ScaleTexture porttex(i), 1, -1
+Next
+
+; Posizioni REALI dal ponte (dm_portraits_0.txt): un ritratto per riga-blocco
+;   fx, fy (cella calpestabile)  +  dir muro (0=ovest 1=est 2=nord 3=sud)  +  ord
+; Coordinate griglia identiche alla mappa, quindi stessa proiezione della camera.
+pf = ReadFile("dm_portraits_0.txt")
+If pf <> 0 Then
+	pcount = Int(ReadLine$(pf))
+	For i = 1 To pcount
+		fx  = Int(ReadLine$(pf))
+		fy  = Int(ReadLine$(pf))
+		dir = Int(ReadLine$(pf))
+		ord = Int(ReadLine$(pf))
+		If fx >= 0 And fx < W And fy >= 0 And fy < H Then
+			cxw# = (W-1-fx)*CELL             ; mondo riflesso su X (come la camera)
+			czw# = fy*CELL
+
+			ox# = 0.0 : oz# = 0.0
+			sx# = PORT_W/2.0 : sz# = PORT_W/2.0  ; uno dei due diventa lo spessore
+			near# = CELL/2.0 - 0.12              ; appena davanti alla superficie
+			If dir = 0 Then ox = +near : sx = PORT_T/2.0   ; muro a +X (griglia ovest)
+			If dir = 1 Then ox = -near : sx = PORT_T/2.0   ; muro a -X (griglia est)
+			If dir = 2 Then oz = -near : sz = PORT_T/2.0   ; muro a -Z (griglia nord)
+			If dir = 3 Then oz = +near : sz = PORT_T/2.0   ; muro a +Z (griglia sud)
+
+			; cornice scura, leggermente piu' grande e arretrata verso il muro
+			fr = CreateCube()
+			ScaleEntity fr, sx*1.18, (PORT_W/2.0)*1.18, sz*1.18
+			PositionEntity fr, cxw + ox*1.04, EYE, czw + oz*1.04
+			EntityColor fr, 30, 22, 14
+
+			; il quadro col ritratto del campione
+			pic = CreateCube()
+			ScaleEntity pic, sx, PORT_W/2.0, sz
+			PositionEntity pic, cxw + ox, EYE, czw + oz
+			EntityColor pic, 255, 255, 255
+			If ord >= 0 And ord < NPORT Then
+				If porttex(ord) <> 0 Then EntityTexture pic, porttex(ord)
+			EndIf
+			EntityFX pic, 1                  ; full-bright: il volto resta leggibile
+		EndIf
+	Next
+	CloseFile pf
+EndIf
 
 ; ---------------------------------------------------------------- loop live
 px = W/2 : py = H/2 : pf = 0      ; default finche' non leggiamo lo stato

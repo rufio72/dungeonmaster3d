@@ -66,6 +66,7 @@ play_DungeonMaster/dm_state.txt
 play_DungeonMaster/dm_world_state.json
 play_DungeonMaster/dm_level_*.txt
 play_DungeonMaster/dm_level_*.json
+play_DungeonMaster/dm_portraits_*.txt
 
 # --- config affiancato ai dati di gioco ---
 play_DungeonMaster/config.linux

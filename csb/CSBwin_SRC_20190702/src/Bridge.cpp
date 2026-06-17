@@ -182,6 +182,8 @@ static void EmitJsonStr(FILE *f, const char *s, int maxLen)
 // ---- MAPPA COMPLETA del livello (statica) --------------------------------
 // Tipo di cella = bit 5-7 della CELLFLAG (vedi enum ROOMTYPE):
 //   0=wall 1=floor 2=pit 3=stairs 4=door 5=teleporter 6=falsewall
+static void DumpPortraits(void);   // definita piu' sotto
+
 static void DumpLevelMap(void)
 {
   char path[64];
@@ -232,6 +234,71 @@ static void DumpLevelMap(void)
 
   printf("[bridge] MAPPA livello %d (%dx%d) -> %s (+ .txt)\n",
          (int)d.LoadedLevel, W, H, path);
+  fflush(stdout);
+
+  DumpPortraits();   // posizioni reali dei ritratti dei campioni (statico)
+}
+
+// ---- ritratti dei campioni (statico, posizioni REALI dal dungeon) --------
+// Nella Hall of Champions ogni ritratto e' un attuatore "wall decoration" di
+// tipo 127 montato su una cella-MURO (stone). Per ognuno:
+//   - obj.pos()      = direzione (0..3) dal muro VERSO la cella calpestabile da
+//                      cui lo si guarda  =>  cella = muro + delta(pos())
+//   - DB3::value()&511 = indice campione 0..23 (atlante grafico 26)
+// Esportiamo in COORDINATE GRIGLIA (le stesse di dm_level_<N>.txt) la cella
+// calpestabile (fx,fy) + la direzione del muro vista da quella cella
+// (0=ovest 1=est 2=nord 3=sud) + l'indice ritratto. Cosi' il visualizzatore li
+// piazza esattamente sulla faccia di muro giusta, come nel gioco originale.
+static void DumpPortraits(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_portraits_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+
+  int W = d.width, H = d.height;
+  int fxA[256], fyA[256], dirA[256], ordA[256];
+  int cnt = 0;
+
+  for (int wy = 0; wy < H && cnt < 256; wy++)
+    for (int wx = 0; wx < W && cnt < 256; wx++)
+      for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbACTUATOR) continue;
+        DBCOMMON *a = GetCommonAddress(o);
+        if (a == NULL) continue;
+        DB3 *p = a->CastToDB3();
+        if (p == NULL) continue;
+        if (p->actuatorType() != 127) continue;            // 127 = portrait
+        if ((p->State() & PORTRAIT_HidePortrait) != 0) continue;
+
+        int s  = o.pos() & 3;
+        int dx = (int)d.DeltaX[s], dy = (int)d.DeltaY[s];   // muro -> cella
+        int fx = wx + dx, fy = wy + dy;                     // cella calpestabile
+        if (fx < 0 || fx >= W || fy < 0 || fy >= H) continue;
+
+        // direzione del muro vista DALLA cella calpestabile (= -delta)
+        int dir = -1;
+        if      (dx ==  1 && dy ==  0) dir = 0;             // muro a ovest (fx-1)
+        else if (dx == -1 && dy ==  0) dir = 1;             // muro a est   (fx+1)
+        else if (dx ==  0 && dy ==  1) dir = 2;             // muro a nord  (fy-1)
+        else if (dx ==  0 && dy == -1) dir = 3;             // muro a sud   (fy+1)
+        if (dir < 0) continue;
+
+        int ord = p->value() & 511;
+        if (ord > 23) continue;
+
+        fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir; ordA[cnt] = ord;
+        cnt++;
+      }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n", fxA[i], fyA[i], dirA[i], ordA[i]);
+  fclose(f);
+
+  printf("[bridge] ritratti livello %d: %d -> %s\n",
+         (int)d.LoadedLevel, cnt, path);
   fflush(stdout);
 }
 

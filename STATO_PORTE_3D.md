@@ -99,3 +99,30 @@ Per tenere aperte tutte le opzioni, l'engine NON deve avere contenuto hardcoded:
   il prossimo e' un **formato di livello proprio**, indipendente da CSBwin.
 - bonus: il data-driven abilita editor di mappe, contenuti scaricabili (DLC) e — piu' avanti
   — il **multiplayer** (stato di gioco condiviso).
+
+---
+
+## Rilievo muri/pavimento — analisi & direzione (2026-06-18)
+
+Obiettivo: muri (e pavimento) non piatti, con **solchi in rilievo tra i mattoni**.
+
+### Bump/normal mapping "vero": perche' NON e' una patch (verificato sul codice)
+- `blitz3d.gl/default.glsl`: l'illuminazione e' **per-VERTICE** (loop luci nel *vertex*
+  shader → `bbVertex_Color`); il fragment campiona solo texture+fog. Il bump richiede
+  luce **per-pixel** → va spostato il modello di luce nel fragment.
+- `GLVertex` (blitz3d.gl.cpp:54) = coords/normal/color/tex0/tex1 → **nessuna tangente**,
+  e nessuna generazione tangenti nel codice. `BLEND_DOT3` esiste ma non e' implementato.
+- Servirebbero 4 strati: (A) luce per-pixel, (B) tangenti [formato vertice+generazione],
+  (C) binding normal map [API+UBO], (D) sample+TBN nel fragment, (E) asset normal map.
+  Progetto engine multi-strato, tocca TUTTO il 3D (rischio regressioni).
+- **Scorciatoie**: normal map **object-space** salta le tangenti (B) — i muri sono statici
+  e allineati agli assi, basta `bbNormalMatrix` (gia' c'e'). E la sola **luce per-pixel (A)**
+  migliorerebbe gia' molto muri/pavimento (oggi quad a 4 vertici → quasi nessun gradiente).
+
+### Scelta attuale: GEOMETRIA riusata (zero modifiche al runtime) — IN PROVA
+Una **mesh "pannello di rilievo"** generata una volta (mattoni proud / solchi malta
+incassati), texturizzata col muro, **istanziata** (`CopyEntity`) sulle facce di muro
+visibili (verso corridoio). Stesso concetto per il pavimento (lastroni + fughe).
+Pro: rilievo vero che cattura luce/nebbia, nessun rischio engine. Contro: qualche
+poligono in piu' (gestito dall'instancing). Se convince si tiene; il bump vero (A+
+object-space normal map) resta opzione futura se si vuole spingere oltre.

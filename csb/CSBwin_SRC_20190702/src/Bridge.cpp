@@ -84,6 +84,192 @@ static int Bridge_ExportPortraits(void)
   return 1;
 }
 
+// ---- estrazione grafiche delle PORTE -------------------------------------
+// Le ante delle porte sono basic-graphics (stesso formato dei ritratti: planare
+// Atari ST a 4 bitplane).  Il motore le risolve per livello in d.DoorGraphic[3][2]
+// (2 tipi x 3 distanze F1/F2/F3) a partire da base = 108 + 3*style.  Le
+// decorazioni murali iniziano alla grafica 121, quindi il blocco-porte sta sotto.
+// Verificato empiricamente: le ante stanno nelle grafiche 108..119 = 4 STILI
+// (legno-borchie / assi-legno / ferro / fulmine) x 3 distanze (108=F1,109=F2,110=F3
+// per lo stile 0, poi +3 per stile). 104..107 e 120 sono frammenti muro/scala e il
+// set di font, NON porte. anchor.txt annota i 6 numeri in uso nel livello corrente.
+// Output (cartella doors/, accanto all'eseguibile):
+//   doors/g<N>.raw    pixel grezzi planari 4-bitplane
+//   doors/doors.txt   righe "N width height stride"
+//   doors/palette.txt 16 righe "r g b" (palette ST corrente)
+//   doors/anchor.txt  i 6 numeri di grafica porta usati: "dist type N"
+[[maybe_unused]] static int Bridge_ExportDoors(void)
+{
+  mkdir("doors", 0755);
+
+  FILE *m = fopen("doors/doors.txt", "w");
+  if (m == NULL) return 0;
+  int saved = 0;
+
+  for (int N = 108; N <= 119; N++)
+  {
+    ui8 *unexp = (ui8 *)d.ppUnExpandedGraphics[N];
+    if (unexp == NULL) continue;
+    int w = (int)(ui16)LE16(*(i16 *)unexp);
+    int h = (int)(ui16)LE16(*(i16 *)(unexp + 2));
+    if (w <= 0 || h <= 0 || w > 512 || h > 512) continue;
+
+    int stride = ((w + 15) & ~15) / 2;          // byte/riga (4 bitplane, 16px/8byte)
+    ui8 *gfx = (ui8 *)GetBasicGraphicAddress(N); // espande on-demand
+    if (gfx == NULL) continue;
+
+    char p[64];
+    snprintf(p, sizeof(p), "doors/g%d.raw", N);
+    FILE *f = fopen(p, "wb");
+    if (f == NULL) continue;
+    fwrite(gfx, 1, (size_t)stride * h, f);
+    fclose(f);
+
+    fprintf(m, "%d %d %d %d\n", N, w, h, stride);
+    saved++;
+  }
+  fclose(m);
+
+  // palette ST corrente
+  FILE *pf = fopen("doors/palette.txt", "w");
+  if (pf != NULL)
+  {
+    for (int i = 0; i < 16; i++)
+    {
+      int r, g, b; STtoRGB((int)d.Palette11946.color[i], &r, &g, &b);
+      fprintf(pf, "%d %d %d\n", r, g, b);
+    }
+    fclose(pf);
+  }
+
+  // ancore: i 6 numeri di grafica porta realmente risolti per questo livello
+  FILE *af = fopen("doors/anchor.txt", "w");
+  if (af != NULL)
+  {
+    const char *dn[3] = { "F3", "F2", "F1" };
+    for (int dist = 0; dist < 3; dist++)
+      for (int type = 0; type < 2; type++)
+        fprintf(af, "%s type%d %d\n", dn[dist], type, (int)d.DoorGraphic[dist][type]);
+    fclose(af);
+  }
+
+  printf("[bridge] grafiche porte: %d salvate (108..119, 4 stili x 3 dist) -> doors/\n", saved);
+  fflush(stdout);
+  return saved;
+}
+
+// ---- helper condivisi per estrarre basic-graphics ------------------------
+// Dump grezzo di una basic-graphic (formato planare ST 4-bitplane) in
+// <folder>/g<N>.raw, con riga "N w h stride" nel manifest. Ritorna 1 se salvata.
+static int Bridge_DumpGfx(const char *folder, FILE *manifest, int N)
+{
+  ui8 *unexp = (ui8 *)d.ppUnExpandedGraphics[N];
+  if (unexp == NULL) return 0;
+  int w = (int)(ui16)LE16(*(i16 *)unexp);
+  int h = (int)(ui16)LE16(*(i16 *)(unexp + 2));
+  if (w <= 0 || h <= 0 || w > 512 || h > 512) return 0;
+
+  int stride = ((w + 15) & ~15) / 2;
+  ui8 *gfx = (ui8 *)GetBasicGraphicAddress(N);
+  if (gfx == NULL) return 0;
+
+  char p[96];
+  snprintf(p, sizeof(p), "%s/g%d.raw", folder, N);
+  FILE *f = fopen(p, "wb");
+  if (f == NULL) return 0;
+  fwrite(gfx, 1, (size_t)stride * h, f);
+  fclose(f);
+  fprintf(manifest, "%d %d %d %d\n", N, w, h, stride);
+  return 1;
+}
+
+// Scrive la palette ST corrente in <folder>/palette.txt (16 righe "r g b").
+static void Bridge_DumpPalette(const char *folder)
+{
+  char p[96];
+  snprintf(p, sizeof(p), "%s/palette.txt", folder);
+  FILE *pf = fopen(p, "w");
+  if (pf == NULL) return;
+  for (int i = 0; i < 16; i++)
+  {
+    int r, g, b; STtoRGB((int)d.Palette11946.color[i], &r, &g, &b);
+    fprintf(pf, "%d %d %d\n", r, g, b);
+  }
+  fclose(pf);
+}
+
+// ---- estrazione STIPITI (telai/assi laterali delle porte) -----------------
+// I telai porta NON sono accessibili come basic-graphics (ppUnExpandedGraphics
+// 77.. e' NULL: il motore li espande direttamente nei buffer pDoorBitmaps[0..7]
+// e libera l'originale).  Quindi dumpiamo i BUFFER gia' espansi (formato planare
+// ST 4-bitplane).  Le dimensioni stanno nei DoorFrameRect[]: uByte4=larghezza,
+// uByte5=altezza (come usate in MakeMirror).  I buffer hanno dimensioni fisse
+// (allocateMemory in CSBCode.cpp:10183-10190); le elenchiamo per il decoder, che
+// puo' verificare width*height contro la dimensione del buffer.
+//   pDoorBitmaps[]: 0=FrameRight F1, 1=EdgeFrame F0, 2=FrameLeft F1, 3=FrameLeft F2,
+//                   4=FrameLeft F3, 5=FrameLeft F3L1, 6=TopTrack F1, 7=TopTrack F2
+[[maybe_unused]] static int Bridge_ExportJambs(void)
+{
+  mkdir("jambs", 0755);
+  static const int bufSize[8] = { 1504, 1968, 1504, 1560, 704, 688, 256, 144 };
+
+  FILE *m = fopen("jambs/jambs.txt", "w");
+  if (m == NULL) return 0;
+  int saved = 0;
+  for (int i = 0; i < 8; i++)
+  {
+    if (d.pDoorBitmaps[i] == NULL) continue;
+    char p[96];
+    snprintf(p, sizeof(p), "jambs/p%d.raw", i);
+    FILE *f = fopen(p, "wb");
+    if (f == NULL) continue;
+    fwrite(d.pDoorBitmaps[i], 1, (size_t)bufSize[i], f);
+    fclose(f);
+    // dimensioni dal rect corrispondente (best-effort, il decoder le verifica)
+    int w = d.DoorFrameRect[i].b.uByte4;
+    int h = d.DoorFrameRect[i].b.uByte5;
+    fprintf(m, "%d %d %d %d\n", i, w, h, bufSize[i]);
+    saved++;
+  }
+  fclose(m);
+  Bridge_DumpPalette("jambs");
+
+  // dump completo degli 8 RectPos (8 byte ciascuno) per analisi offline
+  FILE *rf = fopen("jambs/rects.txt", "w");
+  if (rf != NULL)
+  {
+    for (int i = 0; i < 8; i++)
+      fprintf(rf, "rect%d x1=%d x2=%d y1=%d y2=%d w=%d h=%d b6=%d b7=%d\n", i,
+              d.DoorFrameRect[i].b.x1, d.DoorFrameRect[i].b.x2,
+              d.DoorFrameRect[i].b.y1, d.DoorFrameRect[i].b.y2,
+              d.DoorFrameRect[i].b.uByte4, d.DoorFrameRect[i].b.uByte5,
+              d.DoorFrameRect[i].b.uByte6, d.DoorFrameRect[i].b.uByte7);
+    fclose(rf);
+  }
+  printf("[bridge] stipiti porte: %d buffer pDoorBitmaps salvati -> jambs/\n", saved);
+  fflush(stdout);
+  return saved;
+}
+
+// ---- estrazione BOTTONI (attuatori sul muro: pulsanti/serrature) ----------
+// Ogni decorazione murale tipo T usa le grafiche 121 + 2*T (2 per decorazione).
+// I dispositivi che aprono le porte: interruttori/pulsanti (7,14,15,16,47,48,49,50,54),
+// leve (44,45) e serrature/keyhole (5,17..32).  Tipo 54 -> grafica 121+2*54=229,
+// quindi dumpiamo 121..235 (tutte le decorazioni); il decoder etichetta dal tipo.
+[[maybe_unused]] static int Bridge_ExportButtons(void)
+{
+  mkdir("buttons", 0755);
+  FILE *m = fopen("buttons/buttons.txt", "w");
+  if (m == NULL) return 0;
+  int saved = 0;
+  for (int N = 121; N <= 235; N++) saved += Bridge_DumpGfx("buttons", m, N);
+  fclose(m);
+  Bridge_DumpPalette("buttons");
+  printf("[bridge] bottoni/serrature: %d salvati (121..235) -> buttons/\n", saved);
+  fflush(stdout);
+  return saved;
+}
+
 // ---- etichette leggibili -------------------------------------------------
 
 static const char *RoomTypeName(int t)
@@ -378,8 +564,43 @@ static void EmitChampions(FILE *f)
   fprintf(f, "\n  ],\n");
 }
 
+// ---- porte vicine (dinamico, per-tick) -----------------------------------
+// Per ogni cella-porta del livello (room type 4 = roomDOOR) esporta:
+//   x, y, state, type
+// dove state = cellflags & 7 (0=aperta .. 4=chiusa, 5=foro/distrutta) e' lo
+// stato di apertura che il motore aggiorna da solo quando la porta si muove, e
+// type = DB0::doorType() (0/1, due stili di porta per livello).  Il viewer le
+// anima facendole scorrere verso l'alto (portcullis), interpolando fra i tick.
+// Lettura pura: nessuna logica di gioco, il motore decide quando aprire/chiudere.
+static void EmitDoorsText(FILE *ft)
+{
+  int W = d.width, H = d.height;
+  int dxA[512], dyA[512], stA[512], tyA[512];
+  int cnt = 0;
+  for (int y = 0; y < H && cnt < 512; y++)
+    for (int x = 0; x < W && cnt < 512; x++)
+    {
+      int cf = GetCellFlags(x, y);
+      if (((cf >> 5) & 7) != roomDOOR) continue;
+      int state = cf & 7;
+      int type = 0;
+      RN dn = FindFirstDoor(x, y);
+      if (dn != RNeof)
+      {
+        DB0 *door = GetRecordAddressDB0(dn);
+        if (door != NULL) type = door->doorType();
+      }
+      dxA[cnt] = x; dyA[cnt] = y; stA[cnt] = state; tyA[cnt] = type;
+      cnt++;
+    }
+  fprintf(ft, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(ft, "%d\n%d\n%d\n%d\n", dxA[i], dyA[i], stA[i], tyA[i]);
+}
+
 // Variante plain-text dello stato, per Blitz3D (un valore per riga):
 //   px / py / facing / level / numMonsters / (per mostro: typeId,x,y)
+//   / numDoors / (per porta: x,y,state,type)
 static void DumpStateText(void)
 {
   FILE *ft = fopen("dm_state.txt", "w");
@@ -413,6 +634,8 @@ static void DumpStateText(void)
         if (m == NULL || m->invisible()) continue;
         fprintf(ft, "%d\n%d\n%d\n", (int)m->monsterType(), x, y);
       }
+
+  EmitDoorsText(ft);   // porte del livello (stato di apertura + tipo)
   fclose(ft);
 }
 
@@ -458,6 +681,18 @@ void Bridge_Tick(void)
   // Ritenta finche' non ne salva almeno uno.
   static bool portraitsDone = false;
   if (!portraitsDone && Bridge_ExportPortraits() > 0) portraitsDone = true;
+
+  // Estrazione grafiche porte: DISABILITATA — l'abbiamo gia' fatta (vedi doors/).
+  // Riabilitare queste righe solo per ri-estrarre da capo le ante.
+  // static bool doorsDone = false;
+  // if (!doorsDone && Bridge_ExportDoors() > 0) doorsDone = true;
+
+  // Estrazione stipiti + bottoni: DISABILITATA — gia' fatta (vedi jambs/ e buttons/).
+  // Riabilitare queste righe solo per ri-estrarre.
+  // static bool jambsDone = false;
+  // if (!jambsDone && Bridge_ExportJambs() > 0) jambsDone = true;
+  // static bool buttonsDone = false;
+  // if (!buttonsDone && Bridge_ExportButtons() > 0) buttonsDone = true;
 
   static int prevLevel = -999, prevX = -1, prevY = -1, prevFacing = -1;
   static int lastDumpTime = -1000;

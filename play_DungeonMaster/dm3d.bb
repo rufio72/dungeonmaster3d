@@ -12,11 +12,23 @@ SetBuffer BackBuffer()
 
 Const CELL# = 4.0          ; unita' 3D per cella della griglia
 Const EYE#  = 2.0          ; altezza occhi camera
-Const SMOOTH# = 0.3        ; fattore di interpolazione camera (0..1): piu' alto = piu' rapido
+Const SMOOTH# = 0.15       ; interpolazione camera (piu basso = piu fluido tra gli step)
 
 Const NPORT = 24           ; ritratti dei campioni: portraits/00.png .. portraits/23.png
 Const PORT_W# = CELL*0.55  ; larghezza/altezza del quadro appeso al muro
 Const PORT_T# = 0.10       ; spessore della tavola (sottile)
+
+Const DOOR_T# = 0.30       ; mezzo-spessore dell'anta (asse "stretto")
+Const DOOR_W# = CELL/2.0 - 0.15   ; mezza-larghezza dell'anta (riempie il varco)
+Const DOOR_H# = CELL/2.0 - 0.08   ; mezza-altezza dell'anta (pavimento->soffitto)
+Const DOOR_SMOOTH# = 0.20  ; interpolazione scorrimento porta (0..1)
+Const DOORCAM = 0          ; 1 = camera di debug fissa davanti alla prima porta; 0 = segue il party
+Const SHOT = 0             ; 1 = salva uno screenshot (dm3d_shot.bmp) ed esce (per il print screen)
+
+Global woodtex             ; texture legno dell'anta (vista anche da BuildWoodDoor)
+Global irontex             ; texture ferro della grata (vista anche da BuildIronDoor)
+Global walltex             ; texture muro (vista anche da BuildDoorFrame per gli stipiti)
+Global jambtex             ; stessa texture muro ma con UV scalate per gli stipiti stretti
 
 ; ----------------------------------------- attende la mappa (entra nel dungeon)
 W = 0 : H = 0
@@ -70,11 +82,49 @@ AmbientLight 120, 120, 120
 
 ; texture muri
 walltex = LoadTexture("test.png")
+; stessa texture per gli stipiti, ma con UV scalate: la faccia stretta del palo
+; (larghezza ~2*pw=0.54) mostra solo 0.54/CELL della texture -> stessa densita'
+; di pietre dei muri, niente compressione. (pw=0.27 in BuildDoorFrame.)
+jambtex = LoadTexture("test.png")
+If jambtex <> 0 Then ScaleTexture jambtex, CELL/0.54, 1.0
+; texture legno dell'anta (segnaposto generato: dm_wood.png); la geometria
+; (bande + borchie) fornisce il rilievo, questa solo la venatura della superficie.
+woodtex = LoadTexture("dm_wood.png")
+irontex = LoadTexture("dm_iron.png")       ; metallo per la grata di ferro
 ; texture soffitto e pavimento (una piastrella per cella -> mapping di default).
 ; NB: niente piu' cuboni giganti per floor/ceiling (questo motore non li
 ;     renderizzava): pavimento e soffitto sono piastrelle costruite nel loop.
 ceiltex  = LoadTexture("soffitto.png")
 floortex = LoadTexture("pavi_3.png")
+
+; ante delle porte, indicizzate per cella (idx = y*W + x): l'entita' 3D, la sua
+; quota di base (porta chiusa) e l'apertura corrente interpolata (0=chiusa..1=su).
+Dim doorEnt(W*H)
+Dim doorBaseY#(W*H)
+Dim doorOpen#(W*H)
+
+; tipo di ogni porta (statico): letto UNA volta dal ponte (dm_state.txt) per
+; scegliere lo stile in costruzione. -1 = sconosciuto (default: ferro).
+Dim doorTypeAt(W*H)
+For i = 0 To W*H-1 : doorTypeAt(i) = -1 : Next
+tf = ReadFile("dm_state.txt")
+If tf <> 0 Then
+	tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)        ; px, py
+	tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)        ; facing, level
+	tmc = Int(ReadLine$(tf))                         ; n. mostri
+	For m = 1 To tmc
+		tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)
+	Next
+	tdc = Int(ReadLine$(tf))                         ; n. porte
+	For m = 1 To tdc
+		ax = Int(ReadLine$(tf))
+		ay = Int(ReadLine$(tf))
+		az = Int(ReadLine$(tf))                      ; state (ignorato qui)
+		aty = Int(ReadLine$(tf))                     ; type
+		If ax >= 0 And ax < W And ay >= 0 And ay < H Then doorTypeAt(ay*W+ax) = aty
+	Next
+	CloseFile tf
+EndIf
 
 ; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
 For y = 0 To H-1
@@ -112,12 +162,55 @@ For y = 0 To H-1
 				EntityColor ct, 40, 40, 40
 			EndIf
 
-			; marker porta / scale sopra la piastrella
+			; anta della porta (Fase A): pannello che riempie il varco, orientato
+			; dagli stipiti (i due muri opposti). Resta chiuso finche' lo stato
+			; live (dm_state.txt) non lo fa scorrere verso l'alto.
 			If c$ = "4" Then
-				dr = CreateCube()
-				ScaleEntity dr, CELL/2.0, CELL/2.0, 0.2
-				PositionEntity dr, wx, CELL/2.0, wz
-				EntityColor dr, 110, 80, 40
+				; stipiti = muri ("0") adiacenti; il varco e' sull'asse opposto.
+				wW = (x <= 0)   Or (Mid$(grid$(y), x, 1) = "0")
+				wE = (x >= W-1) Or (Mid$(grid$(y), x+2, 1) = "0")
+				wN = (y <= 0)   Or (Mid$(grid$(y-1), x+1, 1) = "0")
+				wS = (y >= H-1) Or (Mid$(grid$(y+1), x+1, 1) = "0")
+
+				; thinX = True se il varco e' est-ovest (stipiti a N e S):
+				; anta sottile in X; altrimenti varco nord-sud, sottile in Z.
+				thinX = (wN And wS) And Not (wW And wE)
+				idx = y*W + x
+
+				; anta IN GEOMETRIA su pivot che scorre su; stile dal doorType:
+				; 0 (e sconosciuto) = ferro a grata (con buchi); 1 = legno.
+				dr = BuildDoor(wx, wz, thinX, doorTypeAt(idx))
+
+				doorEnt(idx)   = dr
+				doorBaseY#(idx) = CELL/2.0
+				doorOpen#(idx)  = 0.0                        ; parte chiusa
+
+				BuildDoorFrame(wx, wz, thinX)               ; stipiti in pietra (statici)
+
+				; door-cam di debug: memorizza la prima porta e una posa davanti.
+				If DOORCAM And firstDoorPiv = 0 Then
+					firstDoorPiv = dr
+					; yaw nella convenzione del party: (2-facing)*90, facing 0=N 1=E 2=S 3=O
+					If thinX Then
+						fdCamZ# = wz
+						If x < W-1 And Mid$(grid$(y), x+2, 1) <> "0" Then
+							fdCamX# = (W-1-(x+1))*CELL   ; camera a est, guarda ovest
+							fdCamYaw# = -90
+						Else
+							fdCamX# = (W-1-(x-1))*CELL   ; camera a ovest, guarda est
+							fdCamYaw# = 90
+						EndIf
+					Else
+						fdCamX# = wx
+						If y < H-1 And Mid$(grid$(y+1), x+1, 1) <> "0" Then
+							fdCamZ# = (y+1)*CELL         ; camera a sud, guarda nord
+							fdCamYaw# = 180
+						Else
+							fdCamZ# = (y-1)*CELL         ; camera a nord, guarda sud
+							fdCamYaw# = 0
+						EndIf
+					EndIf
+				EndIf
 			Else If c$ = "3" Then
 				st = CreateCube()
 				ScaleEntity st, CELL/3.0, 0.3, CELL/3.0
@@ -142,7 +235,9 @@ For i = 0 To NPORT-1
 	Color 120, 200, 120 : Rect 20, 222, (i+1)*600/NPORT, 12, 1
 	Flip
 	n$ = Right$("0" + Str$(i), 2)            ; 0->"00", 5->"05", 23->"23"
-	porttex(i) = LoadTexture("portraits/" + n$ + ".png")
+	; versione ridotta 512x512 (NN_sm.png): caricamento piu' rapido e meno VRAM;
+	; gli originali 1024x1024 (NN.png) restano per usi futuri.
+	porttex(i) = LoadTexture("portraits/" + n$ + "_sm.png")
 	If porttex(i) <> 0 Then ScaleTexture porttex(i), 1, -1
 Next
 
@@ -204,10 +299,43 @@ While Not KeyHit(1)
 		ny = Int(ReadLine$(sf))
 		nf = Int(ReadLine$(sf))
 		lv = Int(ReadLine$(sf))
-		CloseFile sf
 		If nx >= 0 And nx < W And ny >= 0 And ny < H Then
 			px = nx : py = ny : pf = nf
 		EndIf
+
+		; sezione mostri: la saltiamo (3 valori per mostro), poi le porte.
+		mcount = Int(ReadLine$(sf))
+		For m = 1 To mcount
+			junk = ReadLine$(sf) : junk = ReadLine$(sf) : junk = ReadLine$(sf)
+		Next
+
+		; sezione porte: x, y, state (0=aperta..4=chiusa, 5=foro), type (0/1).
+		dcount = Int(ReadLine$(sf))
+		For m = 1 To dcount
+			gx  = Int(ReadLine$(sf))
+			gy  = Int(ReadLine$(sf))
+			gst = Int(ReadLine$(sf))
+			gty = Int(ReadLine$(sf))
+			If gx >= 0 And gx < W And gy >= 0 And gy < H Then
+				idx = gy*W + gx
+				dr = doorEnt(idx)
+				If dr <> 0 Then
+					; apertura bersaglio: 4=chiusa->0, 0=aperta->1; 5 (foro)=tutta aperta
+					tOpen# = (4.0 - gst) / 4.0
+					If gst >= 5 Then tOpen = 1.0
+					If tOpen < 0.0 Then tOpen = 0.0
+					If tOpen > 1.0 Then tOpen = 1.0
+					; scorrimento fluido verso il bersaglio (portcullis: sale)
+					doorOpen#(idx) = doorOpen#(idx) + (tOpen - doorOpen#(idx)) * DOOR_SMOOTH
+					; muovo il PIVOT della porta: i figli (lastra/bande/borchie) seguono
+					wxd# = (W-1-gx)*CELL
+					wzd# = gy*CELL
+					PositionEntity dr, wxd, doorBaseY#(idx) + doorOpen#(idx)*CELL, wzd
+				EndIf
+			EndIf
+		Next
+
+		CloseFile sf
 	EndIf
 
 	; --- target dalla cella/direzione del party ---
@@ -236,13 +364,213 @@ While Not KeyHit(1)
 		cyaw = cyaw + dyaw * SMOOTH
 	EndIf
 
-	PositionEntity camera, cx, cy, cz
-	RotateEntity camera, 0, cyaw, 0
+	; --- idle sway: da fermo la camera "respira" leggermente; si attenua se muove ---
+	moveAmt# = Abs(tx - cx) + Abs(tz - cz) + Abs(dyaw) * 0.02
+	idleK# = 1.0 - moveAmt / (0.5 * CELL)
+	If idleK < 0.0 Then idleK = 0.0
+	If idleK > 1.0 Then idleK = 1.0
+	t# = MilliSecs() * 0.001
+	bobY#   = (Sin(t*55.0) * 0.030 + Sin(t*92.0 + 30) * 0.014) * idleK
+	swayX#  = Sin(t*43.0 + 60) * 0.022 * idleK
+	swayZ#  = Sin(t*37.0 + 200) * 0.022 * idleK
+	idleYaw# = Sin(t*41.0 + 17) * 0.55 * idleK
+	idlePit# = Sin(t*33.0 + 80) * 0.40 * idleK
+	idleRol# = Sin(t*26.0 + 130) * 0.28 * idleK
+
+	PositionEntity camera, cx + swayX, cy + bobY, cz + swayZ
+	RotateEntity camera, idlePit, cyaw + idleYaw, idleRol
+
+	; door-cam di debug: ignora il party e inquadra la prima porta del livello
+	If DOORCAM And firstDoorPiv <> 0 Then
+		PositionEntity camera, fdCamX, EYE, fdCamZ
+		PointEntity camera, firstDoorPiv
+	EndIf
 
 	RenderWorld
 	Color 255,255,255
 	Text 0, 0,  "DM 3D  party (" + px + "," + py + ")  facing " + pf
 	Text 0, 16, "ESC per uscire"
+
+	shotN = shotN + 1
+	If SHOT And shotN = 45 Then
+		SaveBuffer BackBuffer(), "dm3d_shot.bmp"
+		End
+	EndIf
+
 	Flip
 Wend
 End
+
+; --------------------------------------------------------- porta di legno 3D
+; Anta in GEOMETRIA su un pivot (radice che scorre su): lastra texturizzata legno
+; + 3 bande di ferro sporgenti + borchie (cubetti) color ferro chiaro su ogni banda.
+; thinX=True -> varco est-ovest (anta sottile in X); altrimenti sottile in Z.
+; cx,cz = centro cella porta; base Y = CELL/2. Ritorna il pivot.
+Function BuildWoodDoor(cx#, cz#, thinX)
+	piv = CreatePivot()
+	PositionEntity piv, cx, CELL/2.0, cz
+
+	slab = CreateCube()
+	EntityParent slab, piv
+	If thinX Then
+		ScaleEntity slab, DOOR_T, DOOR_H, DOOR_W
+	Else
+		ScaleEntity slab, DOOR_W, DOOR_H, DOOR_T
+	EndIf
+	PositionEntity slab, 0, 0, 0                 ; LOCALE: centro del pivot
+	EntityColor slab, 150, 110, 70
+	If woodtex <> 0 Then EntityTexture slab, woodtex
+
+	For bi = 0 To 2
+		ly# = (bi-1) * (DOOR_H*0.62)            ; offset LOCALE in Y rispetto al pivot
+		band = CreateCube()
+		EntityParent band, piv
+		If thinX Then
+			ScaleEntity band, DOOR_T*1.25, DOOR_H*0.10, DOOR_W*1.01
+		Else
+			ScaleEntity band, DOOR_W*1.01, DOOR_H*0.10, DOOR_T*1.25
+		EndIf
+		PositionEntity band, 0, ly, 0
+		EntityColor band, 60, 62, 70
+
+		For si = -2 To 2
+			stud = CreateCube()
+			EntityParent stud, piv
+			sd# = DOOR_T*0.55
+			off# = si * (DOOR_W*0.40)
+			If thinX Then
+				ScaleEntity stud, DOOR_T*1.5, sd, sd
+				PositionEntity stud, 0, ly, off
+			Else
+				ScaleEntity stud, sd, sd, DOOR_T*1.5
+				PositionEntity stud, off, ly, 0
+			EndIf
+			EntityColor stud, 170, 172, 185
+		Next
+	Next
+
+	Return piv
+End Function
+
+; --------------------------------------------------------- dispatcher per tipo
+; Sceglie lo stile dell'anta dal doorType del ponte:
+;   0 (e -1 sconosciuto) -> ferro a grata (buchi, si vede attraverso)
+;   1                    -> legno
+Function BuildDoor(cx#, cz#, thinX, dtype)
+	If dtype = 1 Then
+		Return BuildWoodDoor(cx, cz, thinX)
+	Else
+		Return BuildIronDoor(cx, cz, thinX)
+	EndIf
+End Function
+
+; --------------------------------------------------------- porta di ferro (grata)
+; Reticolo di barre di ferro (5 verticali x 5 orizzontali) con i VUOTI (buchi) tra
+; cui si vede dietro, stile portcullis di Dungeon Master. Borchie agli incroci.
+; Niente lastra piena: e' la grata stessa. thinX/cx/cz come BuildWoodDoor.
+Function BuildIronDoor(cx#, cz#, thinX)
+	piv = CreatePivot()
+	PositionEntity piv, cx, CELL/2.0, cz
+
+	bt# = 0.08                         ; mezza larghezza barra (piu' sottile)
+	bd# = DOOR_T * 0.5                 ; mezza profondita' (dimezzata: meno spessa)
+	gw# = DOOR_W * 0.75                ; mezza-larghezza grata (-3%, centrata)
+	gh# = DOOR_H * 0.88                ; mezza-altezza grata (+5% ancora, centrata)
+
+	; barre verticali (5: 2 bordi + 3 interne)
+	For i = 0 To 4
+		fx# = -gw + (2.0*gw) * i / 4.0
+		bar = CreateCube()
+		EntityParent bar, piv
+		If thinX Then
+			ScaleEntity bar, bd, gh, bt
+			PositionEntity bar, 0, 0, fx
+		Else
+			ScaleEntity bar, bt, gh, bd
+			PositionEntity bar, fx, 0, 0
+		EndIf
+		EntityColor bar, 235, 240, 250
+		If irontex <> 0 Then EntityTexture bar, irontex
+		EntityShininess bar, 0.12
+	Next
+
+	; barre orizzontali (5)
+	For j = 0 To 4
+		fy# = -gh + (2.0*gh) * j / 4.0
+		bar = CreateCube()
+		EntityParent bar, piv
+		If thinX Then
+			ScaleEntity bar, bd, bt, gw
+		Else
+			ScaleEntity bar, gw, bt, bd
+		EndIf
+		PositionEntity bar, 0, fy, 0
+		EntityColor bar, 235, 240, 250
+		If irontex <> 0 Then EntityTexture bar, irontex
+		EntityShininess bar, 0.12
+	Next
+
+	; borchie/bulloni agli incroci (sporgono dalla grata)
+	For i = 0 To 4
+		fx# = -gw + (2.0*gw) * i / 4.0
+		For j = 0 To 4
+			fy# = -gh + (2.0*gh) * j / 4.0
+			stud = CreateCube()
+			EntityParent stud, piv
+			sd# = bt*1.6
+			If thinX Then
+				ScaleEntity stud, bd*1.8, sd, sd
+				PositionEntity stud, 0, fy, fx
+			Else
+				ScaleEntity stud, sd, sd, bd*1.8
+				PositionEntity stud, fx, fy, 0
+			EndIf
+			EntityColor stud, 235, 240, 250
+			If irontex <> 0 Then EntityTexture stud, irontex
+			EntityShininess stud, 0.12
+
+			; bullone: perno piu' sottile e piu' lungo che SPORGE dal cubetto
+			; (spunta su entrambe le facce della grata)
+			bolt = CreateCube()
+			EntityParent bolt, piv
+			bz# = sd*0.45
+			If thinX Then
+				ScaleEntity bolt, bd*2.3, bz, bz
+				PositionEntity bolt, 0, fy, fx
+			Else
+				ScaleEntity bolt, bz, bz, bd*2.3
+				PositionEntity bolt, fx, fy, 0
+			EndIf
+			EntityColor bolt, 205, 210, 220
+			If irontex <> 0 Then EntityTexture bolt, irontex
+			EntityShininess bolt, 0.12
+		Next
+	Next
+
+	Return piv
+End Function
+
+; --------------------------------------------------------- stipiti (telaio porta)
+; Telaio in pietra attorno al vano: due pali laterali + architrave in alto.
+; STATICO (non sul pivot che scorre). Texture muro. thinX/cx/cz come le porte.
+Function BuildDoorFrame(cx#, cz#, thinX)
+	; due pali insieme ~28% della larghezza del vano (2*DOOR_W): 4*pw/(2*DOOR_W)
+	pw# = 0.27                         ; mezza larghezza palo
+	dp# = DOOR_T * 1.5                 ; mezza profondita' (meno profondo di prima)
+	hY# = CELL/2.0
+
+	; SOLO due pali laterali (niente architrave sopra): bordo esterno sul bordo del
+	; vano, estesi verso l'interno -> interamente visibili nell'apertura.
+	For s = -1 To 1 Step 2
+		post = CreateCube()
+		If thinX Then
+			ScaleEntity post, dp, DOOR_H+0.12, pw
+			PositionEntity post, cx, hY, cz + s*(CELL/2.0 - pw)
+		Else
+			ScaleEntity post, pw, DOOR_H+0.12, dp
+			PositionEntity post, cx + s*(CELL/2.0 - pw), hY, cz
+		EndIf
+		EntityColor post, 210, 210, 210
+		If jambtex <> 0 Then EntityTexture post, jambtex
+	Next
+End Function

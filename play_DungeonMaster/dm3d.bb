@@ -74,14 +74,26 @@ CameraFogMode camera, 1
 CameraFogColor camera, 0, 0, 0
 CameraFogRange camera, CELL*0.5, CELL*3.0
 
-light = CreateLight()
-RotateEntity light, 50, 60, 0
-; luce ambientale: senza, le superfici rivolte via dalla luce (es. la faccia
-; inferiore del soffitto) restano nere. Cosi' tutto riceve una base di luce.
-AmbientLight 120, 120, 120
+; TORCIA: il party porta una torcia. Unica vera sorgente = una point light calda
+; che segue la camera (posizionata ogni frame nel loop). L'ambient e' minimo: il
+; dungeon e' buio, solo la torcia illumina (il rilievo dei muri vive di questa luce).
+light = CreateLight(2)                 ; 2 = point light
+LightColor light, 255, 190, 120        ; calda ma piu' luminosa (piu' lumen su G/B)
+LightRange light, CELL*5.2             ; raggio ~2x: torcia piu' intensa (att = (1-d/range)^2)
+AmbientLight 16, 16, 16                ; quasi buio: base minima per non avere nero pieno
+; la torcia e' tenuta in mano IN ALTO A DESTRA: figlia della camera con offset
+; locale (X destra, Y su, Z avanti). Luce di taglio -> il rilievo dei muri/pavimento
+; si vede. (colore/range vengono modulati ogni frame nel loop = fiamma.)
+EntityParent light, camera
+PositionEntity light, 0.9, 1.1, 0.2     ; offset locale rispetto alla camera
 
 ; texture muri
 walltex = LoadTexture("test.png")
+; normal map dei muri (derivata da test.png con gen_normalmap.py): aggiunge il
+; rilievo per-pixel di pietre/malta. blend DOT3 (=4) -> lo shader la usa per
+; perturbare la normale invece di colorare. Va nello slot 1, con la diffuse in slot 0.
+walltexN = LoadTexture("test_n.png")
+If walltexN <> 0 Then TextureBlend walltexN, 4
 ; stessa texture per gli stipiti, ma con UV scalate: la faccia stretta del palo
 ; (larghezza ~2*pw=0.54) mostra solo 0.54/CELL della texture -> stessa densita'
 ; di pietre dei muri, niente compressione. (pw=0.27 in BuildDoorFrame.)
@@ -96,6 +108,9 @@ irontex = LoadTexture("dm_iron.png")       ; metallo per la grata di ferro
 ;     renderizzava): pavimento e soffitto sono piastrelle costruite nel loop.
 ceiltex  = LoadTexture("soffitto.png")
 floortex = LoadTexture("pavi_3.png")
+; normal map del pavimento (derivata da pavi_3.png): rilievo delle lastre. DOT3.
+floortexN = LoadTexture("pavi_3_n.png")
+If floortexN <> 0 Then TextureBlend floortexN, 4
 
 ; ante delle porte, indicizzate per cella (idx = y*W + x): l'entita' 3D, la sua
 ; quota di base (porta chiusa) e l'apertura corrente interpolata (0=chiusa..1=su).
@@ -139,7 +154,8 @@ For y = 0 To H-1
 			ScaleEntity wall, CELL/2.0, CELL/2.0, CELL/2.0
 			PositionEntity wall, wx, CELL/2.0, wz
 			EntityColor wall, 255, 255, 255
-			If walltex <> 0 Then EntityTexture wall, walltex
+			If walltex  <> 0 Then EntityTexture wall, walltex,  0, 0   ; diffuse slot 0
+			If walltexN <> 0 Then EntityTexture wall, walltexN, 0, 1   ; normal map slot 1
 		Else
 			; cella calpestabile: piastrella pavimento (y=0) + soffitto (y=CELL)
 			ft = CreateCube()
@@ -147,7 +163,8 @@ For y = 0 To H-1
 			PositionEntity ft, wx, 0.0, wz
 			If floortex <> 0 Then
 				EntityColor ft, 255, 255, 255
-				EntityTexture ft, floortex
+				EntityTexture ft, floortex, 0, 0                       ; diffuse slot 0
+				If floortexN <> 0 Then EntityTexture ft, floortexN, 0, 1 ; normal map slot 1
 			Else
 				EntityColor ft, 60, 60, 60
 			EndIf
@@ -291,6 +308,12 @@ px = W/2 : py = H/2 : pf = 0      ; default finche' non leggiamo lo stato
 camStarted = 0
 cx# = 0.0 : cy# = EYE : cz# = 0.0 : cyaw# = 0.0
 
+; --- stato torcia (fiamma): a SCATTI, non oscillazione continua. Per lo piu' arancio
+; steady; OGNI TANTO una breve fiammata che aumenta luminosita' E vira al giallo limone.
+torchNext = 0       ; ms del prossimo cambio di stato
+torchFlare# = 0.0   ; 0 = baseline arancio .. 1 = fiammata gialla intensa
+torchFlaring = 0    ; 0 = baseline, 1 = sta fiammeggiando
+
 While Not KeyHit(1)
 	; rilegge lo stato dinamico (puo' fallire se il file e' in scrittura: si tiene l'ultimo)
 	sf = ReadFile("dm_state.txt")
@@ -379,6 +402,10 @@ While Not KeyHit(1)
 
 	PositionEntity camera, cx + swayX, cy + bobY, cz + swayZ
 	RotateEntity camera, idlePit, cyaw + idleYaw, idleRol
+	; arretra la camera DIETRO lo sguardo, nel suo spazio LOCALE: cosi' l'offset di
+	; arretramento RUOTA sempre insieme alla vista (MoveEntity = relativo all'orienta-
+	; mento della camera, non al mondo). Verso il bordo posteriore della cella.
+	MoveEntity camera, 0, 0, -CELL * 0.45
 
 	; door-cam di debug: ignora il party e inquadra la prima porta del livello
 	If DOORCAM And firstDoorPiv <> 0 Then
@@ -386,6 +413,30 @@ While Not KeyHit(1)
 		PointEntity camera, firstDoorPiv
 	EndIf
 
+	; (la torcia e' FIGLIA della camera con offset in alto a destra: vedi setup.
+	;  Luce di TAGLIO rispetto allo sguardo, NON sull'occhio, cosi' i solchi del
+	;  bump proiettano ombre visibili. Sull'occhio appiattirebbe il rilievo.)
+
+	; fiamma a SCATTI: baseline arancio-giallo a lungo, poi una BREVE e LIEVE fiammata
+	; (variazione max 4%), poi torna. Discontinua, non un seno continuo.
+	ms = MilliSecs()
+	If ms >= torchNext Then
+		If torchFlaring Then
+			torchFlare = Rnd(0.0, 0.18)        ; ritorno baseline (leggera variazione)
+			torchNext  = ms + Rnd(900, 2600)   ; arancio steady A LUNGO (fiammate RARE)
+			torchFlaring = 0
+		Else
+			torchFlare = Rnd(0.55, 1.0)        ; FIAMMATA: gialla e intensa
+			torchNext  = ms + Rnd(45, 150)     ; breve
+			torchFlaring = 1
+		EndIf
+	EndIf
+	; colore base = arancio CHIARO virato al GIALLO (R max, G alto, B medio-basso).
+	; la fiammata aggiunge una variazione MOLTO sottile: al massimo +4% (un filo piu'
+	; luminosa e piu' gialla), poi torna. Niente sbalzi forti.
+	fvar# = torchFlare * 0.04                   ; 0..0.04 -> tetto +4%
+	LightColor light, 255, 205*(1.0+fvar), 105*(1.0+fvar)   ; arancio chiaro/giallo
+	LightRange light, CELL * 6.0 * (1.0 + fvar)             ; brillantezza +<=4% in fiammata
 	RenderWorld
 	Color 255,255,255
 	Text 0, 0,  "DM 3D  party (" + px + "," + py + ")  facing " + pf

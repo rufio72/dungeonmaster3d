@@ -86,6 +86,7 @@ AmbientLight 16, 16, 16                ; quasi buio: base minima per non avere n
 ; si vede. (colore/range vengono modulati ogni frame nel loop = fiamma.)
 EntityParent light, camera
 PositionEntity light, 0.9, 1.1, 0.2     ; offset locale rispetto alla camera
+LightShadows light, True                ; ombre dinamiche dalla torcia
 
 ; texture muri
 walltex = LoadTexture("test.png")

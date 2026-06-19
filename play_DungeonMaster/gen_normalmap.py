@@ -22,42 +22,53 @@ from scipy.ndimage import gaussian_filter
 
 
 def make_normal(src, dst, lowpass=48.0, denoise=1.5, strength=6.0,
-                groove_boost=0.0, groove_margin=0.06, invert_green=False):
+                groove_boost=0.0, groove_margin=0.06, groove_width=1.0,
+                height_depth=0.0, invert_green=False):
     L = np.asarray(Image.open(src).convert("L"), np.float32) / 255.0
 
-    # 1. high-pass: remove baked lighting / large-scale shading, keep local detail
-    height = L - gaussian_filter(L, lowpass)
+    # Two DECOUPLED relief layers, each with its own strength:
+    #  - SURFACE grain (the gentle texture on the brick faces): high-pass of the
+    #    luminance, scaled by `strength`. Lower it for smoother, less-rough bricks.
+    #  - GROOVES (the black mortar joints between bricks): a mask of how much
+    #    DARKER a pixel is than its local neighbourhood, scaled by `groove_boost`.
+    #    Raise it to carve the borders deeper WITHOUT roughening the brick faces.
+    surf = gaussian_filter(L - gaussian_filter(L, lowpass), denoise)
+    sgy, sgx = np.gradient(surf)
 
-    # 1b. deepen ONLY the black mortar borders between bricks (not the surface
-    # grain). 'mortar' = how much DARKER a pixel is than its local neighbourhood,
-    # beyond a margin: this isolates the continuous dark joint lines and ignores
-    # the gentle grain on the block faces. We push those lines further down so
-    # the joints read as deeper grooves while everything else keeps its strength.
-    if groove_boost > 0.0:
-        local = gaussian_filter(L, 6.0)
-        mortar = np.clip(local - L - groove_margin, 0.0, None)
-        mortar = gaussian_filter(mortar, 1.2)      # sloped groove walls, not a cliff
-        height = height - mortar * groove_boost
+    local = gaussian_filter(L, 6.0)
+    mortar = np.clip(local - L - groove_margin, 0.0, None)   # >0 in the dark joints
+    if groove_width > 1.0:
+        # widen the joints: grey-dilate the mask (groove_width ~ extra px of width)
+        from scipy.ndimage import grey_dilation
+        s = max(2, int(round(groove_width)))
+        mortar = grey_dilation(mortar, size=(s, s))
+    mortar = gaussian_filter(mortar, 1.4)                    # sloped walls, not a cliff
+    mgy, mgx = np.gradient(mortar)
 
-    # 2. light denoise so surface grain doesn't become noisy normals
-    height = gaussian_filter(height, denoise)
-
-    # 3. gradients -> tangent-space normal (flat = +Z)
-    gy, gx = np.gradient(height)
-    nx = -gx * strength
-    ny = -gy * strength
-    nz = np.ones_like(height)
+    # combine: surface gradient * strength + groove gradient * groove_boost
+    nx = -(sgx * strength + mgx * groove_boost)
+    ny = -(sgy * strength + mgy * groove_boost)
+    nz = np.ones_like(L)
     inv = 1.0 / np.sqrt(nx * nx + ny * ny + nz * nz)
     nx *= inv; ny *= inv; nz *= inv
 
-    # 4. encode. Image rows increase downward; OpenGL normal maps want +Y up, so
-    # negate ny by default. invert_green flips this if the result looks inflated.
+    # encode normal. Image rows increase downward; OpenGL normal maps want +Y up,
+    # so negate ny by default. invert_green flips this if the result looks inflated.
     gy_sign = +1.0 if invert_green else -1.0
-    rgb = np.stack([nx * 0.5 + 0.5,
-                    gy_sign * ny * 0.5 + 0.5,
-                    nz * 0.5 + 0.5], axis=-1)
-    Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8)).save(dst)
-    print(f"wrote {dst}  ({L.shape[1]}x{L.shape[0]}, strength={strength}, lowpass={lowpass})")
+    r = nx * 0.5 + 0.5
+    g = gy_sign * ny * 0.5 + 0.5
+    b = nz * 0.5 + 0.5
+
+    # HEIGHT in alpha (for parallax-occlusion mapping): 1 = brick face, 0 = deepest
+    # joint. Derived from the mortar mask so the parallax depth follows the joints.
+    if height_depth > 0.0:
+        h = 1.0 - np.clip(mortar / (mortar.max() + 1e-6) * height_depth, 0.0, 1.0)
+        a = np.clip(h, 0.0, 1.0)
+    else:
+        a = np.ones_like(L)                                 # flat -> parallax no-op
+    rgba = np.stack([r, g, b, a], axis=-1)
+    Image.fromarray((np.clip(rgba, 0, 1) * 255).astype(np.uint8)).save(dst)
+    print(f"wrote {dst}  ({L.shape[1]}x{L.shape[0]}, strength={strength}, groove={groove_boost}, height={height_depth})")
 
 
 if __name__ == "__main__":

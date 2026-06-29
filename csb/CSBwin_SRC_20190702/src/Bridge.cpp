@@ -25,6 +25,12 @@
 #include <cstdio>
 #include <sys/stat.h>
 
+// MinGW's mkdir takes only a path (no POSIX mode argument).
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+#endif
+
 // ---- estrazione ritratti campioni ----------------------------------------
 // I ritratti NON sono in un file grafico: sono incorporati nel record del
 // personaggio (CHARDESC.portrait), 32x28 pixel a 4 bit (16 byte/riga, 28 righe),
@@ -80,6 +86,73 @@ static int Bridge_ExportPortraits(void)
 
   printf("[bridge] atlante ritratti (graphic 26): %dx%d stride=%d -> portraits/\n",
          aw, ah, stride);
+  fflush(stdout);
+  return 1;
+}
+
+// ---- pulsanti di MOVIMENTO (grafica 13) ----------------------------------
+// I 6 pulsanti freccia di DM sono una sola grafica (vedi DrawMovementButtons:
+// GetBasicGraphicAddress(13)). La decodifichiamo (chunky 4-bit, 2px/byte +
+// palette ST) e la salviamo come BMP 24-bit, cosi' dm3d puo' LoadImage()-arla
+// e disegnare le frecce IDENTICHE a quelle del 2D.
+static int Bridge_ExportMoveButtons(void)
+{
+  const int N = 13;
+  ui8 *unexp = (ui8 *)d.ppUnExpandedGraphics[N];
+  if (unexp == NULL) return 0;
+  int w = (int)(ui16)LE16(*(i16 *)unexp);
+  int h = (int)(ui16)LE16(*(i16 *)(unexp + 2));
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return 0;
+  int stride = ((w + 15) & ~15) / 2;            // chunky 4-bit (2 px/byte)
+  ui8 *gfx = (ui8 *)GetBasicGraphicAddress(N);
+  if (gfx == NULL) return 0;
+
+  // Decodifica PLANARE Atari ST a 4 bitplane (word a 16 bit big-endian, una per
+  // plane, gruppi da 16 pixel) -> BMP 24-bit. Verificato che e' il formato giusto
+  // per la grafica 13 (le altre basic-graphics seguono lo stesso schema planare).
+  int pr[16], pg[16], pb[16];
+  for (int i = 0; i < 16; i++)
+  { int r, g, b; STtoRGB((int)d.Palette11946.color[i], &r, &g, &b); pr[i]=r; pg[i]=g; pb[i]=b; }
+
+  FILE *f = fopen("mvbuttons.bmp", "wb");
+  if (f == NULL) return 0;
+  int rowbytes = (w * 3 + 3) & ~3;
+  int imgsize  = rowbytes * h;
+  ui8 hdr[54]; memset(hdr, 0, 54);
+  hdr[0]='B'; hdr[1]='M';
+  *(int *)(hdr + 2)  = 54 + imgsize;
+  *(int *)(hdr + 10) = 54;
+  *(int *)(hdr + 14) = 40;
+  *(int *)(hdr + 18) = w;
+  *(int *)(hdr + 22) = h;
+  *(short *)(hdr + 26) = 1;
+  *(short *)(hdr + 28) = 24;
+  *(int *)(hdr + 34) = imgsize;
+  fwrite(hdr, 1, 54, f);
+
+  int groups = (w + 15) / 16;
+  ui8 *row = (ui8 *)malloc(rowbytes);
+  for (int y = h - 1; y >= 0; y--)            // BMP bottom-up
+  {
+    memset(row, 0, rowbytes);
+    ui8 *r = gfx + (size_t)y * stride;
+    for (int g = 0; g < groups; g++)
+    {
+      ui8 *b = r + g * 8;
+      unsigned p0=(b[0]<<8)|b[1], p1=(b[2]<<8)|b[3], p2=(b[4]<<8)|b[5], p3=(b[6]<<8)|b[7];
+      for (int p = 0; p < 16; p++)
+      {
+        int x = g*16 + p; if (x >= w) break;
+        int bit = 15 - p;
+        int idx = ((p0>>bit)&1) | (((p1>>bit)&1)<<1) | (((p2>>bit)&1)<<2) | (((p3>>bit)&1)<<3);
+        row[x*3+0]=(ui8)pb[idx]; row[x*3+1]=(ui8)pg[idx]; row[x*3+2]=(ui8)pr[idx];
+      }
+    }
+    fwrite(row, 1, rowbytes, f);
+  }
+  free(row);
+  fclose(f);
+  printf("[bridge] pulsanti movimento (graphic 13): %dx%d -> mvbuttons.bmp\n", w, h);
   fflush(stdout);
   return 1;
 }
@@ -369,6 +442,7 @@ static void EmitJsonStr(FILE *f, const char *s, int maxLen)
 // Tipo di cella = bit 5-7 della CELLFLAG (vedi enum ROOMTYPE):
 //   0=wall 1=floor 2=pit 3=stairs 4=door 5=teleporter 6=falsewall
 static void DumpPortraits(void);   // definita piu' sotto
+static void DumpPlates(void);      // pressure plate (sensori-pavimento, type 47)
 
 static void DumpLevelMap(void)
 {
@@ -423,6 +497,7 @@ static void DumpLevelMap(void)
   fflush(stdout);
 
   DumpPortraits();   // posizioni reali dei ritratti dei campioni (statico)
+  DumpPlates();      // pressure plate sul pavimento (sensori type 47)
 }
 
 // ---- ritratti dei campioni (statico, posizioni REALI dal dungeon) --------
@@ -484,6 +559,45 @@ static void DumpPortraits(void)
   fclose(f);
 
   printf("[bridge] ritratti livello %d: %d -> %s\n",
+         (int)d.LoadedLevel, cnt, path);
+  fflush(stdout);
+}
+
+// ---- pressure plate (sensori-pavimento) ----------------------------------
+// Una "pressure plate" e' un attuatore con actuatorType()==47 posato sul
+// PAVIMENTO di una cella (lo cerca il codice movimento/peso del party per far
+// scattare la DSA, es. aprire una porta). A differenza dei ritratti (su muro,
+// type 127) la cella e' direttamente quella dove si trova l'attuatore.
+// Esportiamo le celle (coord. griglia, come dm_level) in dm_plates_<N>.txt:
+//   riga 1: N piastre; poi per ognuna due righe (x, y).
+static void DumpPlates(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_plates_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+
+  int W = d.width, H = d.height;
+  // DIAGNOSTICA: dumpo TUTTI gli attuatori (cella, pos, actuatorType, value) per
+  // identificare il tipo della pressure plate dalla posizione nota.
+  int cnt = 0;
+  fprintf(f, "# x y pos type value (TUTTI gli attuatori, diagnostica)\n");
+  for (int wy = 0; wy < H; wy++)
+    for (int wx = 0; wx < W; wx++)
+      for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbACTUATOR) continue;
+        DBCOMMON *a = GetCommonAddress(o);
+        if (a == NULL) continue;
+        DB3 *p = a->CastToDB3();
+        if (p == NULL) continue;
+        fprintf(f, "%d %d %d %d %d\n", wx, wy, (int)(o.pos() & 3),
+                (int)p->actuatorType(), (int)(p->value() & 511));
+        cnt++;
+      }
+  fclose(f);
+
+  printf("[bridge] attuatori livello %d: %d -> %s (diagnostica)\n",
          (int)d.LoadedLevel, cnt, path);
   fflush(stdout);
 }
@@ -677,10 +791,48 @@ void Bridge_Tick(void)
   if (d.LevelCellFlags == NULL || d.width <= 0 || d.height <= 0) return;
   if (d.pCurrentLevelObjectIndex == NULL) return;
 
+  // ---------------------------------------------------------------------
+  // Canale INVERSO 3D -> 2D: comando di movimento scritto da dm3d.
+  // dm3d scrive un codice in "dm_command.txt"; lo iniettiamo nella coda
+  // mouse come AZIONE gia' risolta (campo .num = codice), esattamente come
+  // fa un click reale dopo l'hit-test (vedi OnMouseClick -> .num = D4W e
+  // HandleMouseEvents -> D6W = .num -> TurnParty/MoveParty). Niente
+  // coordinate ne' contesto RESTARTABLE: il dispatch normale del main loop
+  // applica il movimento col timing/cooldown corretti.
+  //   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
+  {
+    FILE *cf = fopen("dm_command.txt", "r");
+    if (cf != NULL)
+    {
+      int code = 0;
+      int n = fscanf(cf, "%d", &code);
+      fclose(cf);
+      remove("dm_command.txt");          // consuma (un comando per click)
+      if (n == 1 && code >= 1 && code <= 6)
+      {
+        int q = d.MouseQEnd + 1;
+        if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+        pMouseQueue[q].num = (ui16)code;
+        pMouseQueue[q].x = 0;
+        pMouseQueue[q].y = 0;
+        d.MouseQEnd = (i16)q;
+      }
+    }
+  }
+
   // Esporta i ritratti dei campioni una volta (qui graphics.dat e' caricato).
   // Ritenta finche' non ne salva almeno uno.
   static bool portraitsDone = false;
   if (!portraitsDone && Bridge_ExportPortraits() > 0) portraitsDone = true;
+
+  // pulsanti di movimento (grafica 13): esporta una volta come BMP per dm3d
+  static bool mvBtnDone = false;
+  if (!mvBtnDone && Bridge_ExportMoveButtons() > 0) mvBtnDone = true;
+
+  // pressure plate: (ri)esporta quando il livello caricato cambia. Robusto anche
+  // se il dump-mappa (legato al cambio livello) non scatta su auto-resume.
+  static int platesLevel = -999;
+  if (platesLevel != (int)d.LoadedLevel) { platesLevel = (int)d.LoadedLevel; DumpPlates(); }
 
   // Estrazione grafiche porte: DISABILITATA — l'abbiamo gia' fatta (vedi doors/).
   // Riabilitare queste righe solo per ri-estrarre da capo le ante.

@@ -7,7 +7,10 @@
 ; Avviare DOPO che il gioco (CSBwin) e' entrato nel dungeon (cosi' i file esistono).
 ; ESC per uscire.
 
-Graphics3D 640,480,0,2
+; Finestra: 3D pieno a sinistra (640x480) + barra nera azioni a destra (200px).
+Const VIEW_W = 640         ; larghezza viewport 3D
+Const BAR_W  = 200         ; larghezza barra azioni (un po' piu' larga dei tasti)
+Graphics3D VIEW_W+BAR_W, 480, 0, 2
 SetBuffer BackBuffer()
 
 Const CELL# = 4.0          ; unita' 3D per cella della griglia
@@ -29,6 +32,8 @@ Global woodtex             ; texture legno dell'anta (vista anche da BuildWoodDo
 Global irontex             ; texture ferro della grata (vista anche da BuildIronDoor)
 Global walltex             ; texture muro (vista anche da BuildDoorFrame per gli stipiti)
 Global jambtex             ; stessa texture muro ma con UV scalate per gli stipiti stretti
+Global mvImg = 0           ; immagine dei pulsanti movimento (mvbuttons.png, estratta da DM)
+Global hovImg = 0          ; highlight semi-trasparente per la cella sotto il mouse
 
 ; ----------------------------------------- attende la mappa (entra nel dungeon)
 W = 0 : H = 0
@@ -67,6 +72,7 @@ Flip
 
 ; ---------------------------------------------------------------- mondo 3D
 camera = CreateCamera()
+CameraViewport camera, 0, 0, VIEW_W, 480     ; 3D solo a sinistra; a destra la barra
 CameraRange camera, 0.1, 2000
 CameraClsColor camera, 0, 0, 0
 ; nebbia nera: piu' lontano = piu' scuro, fino al nero (look "buio" di DM)
@@ -89,7 +95,7 @@ PositionEntity light, 0.9, 1.1, 0.2     ; offset locale rispetto alla camera
 LightShadows light, True                ; ombre dinamiche dalla torcia
 
 ; texture muri
-walltex = LoadTexture("test.png")
+walltex = LoadTexture("test_new.png")
 ; normal map dei muri (derivata da test.png con gen_normalmap.py): aggiunge il
 ; rilievo per-pixel di pietre/malta. blend DOT3 (=4) -> lo shader la usa per
 ; perturbare la normale invece di colorare. Va nello slot 1, con la diffuse in slot 0.
@@ -98,7 +104,7 @@ If walltexN <> 0 Then TextureBlend walltexN, 4
 ; stessa texture per gli stipiti, ma con UV scalate: la faccia stretta del palo
 ; (larghezza ~2*pw=0.54) mostra solo 0.54/CELL della texture -> stessa densita'
 ; di pietre dei muri, niente compressione. (pw=0.27 in BuildDoorFrame.)
-jambtex = LoadTexture("test.png")
+jambtex = LoadTexture("test_new.png")
 If jambtex <> 0 Then ScaleTexture jambtex, CELL/0.54, 1.0
 ; texture legno dell'anta (segnaposto generato: dm_wood.png); la geometria
 ; (bande + borchie) fornisce il rilievo, questa solo la venatura della superficie.
@@ -436,12 +442,19 @@ While Not KeyHit(1)
 	; la fiammata aggiunge una variazione MOLTO sottile: al massimo +4% (un filo piu'
 	; luminosa e piu' gialla), poi torna. Niente sbalzi forti.
 	fvar# = torchFlare * 0.04                   ; 0..0.04 -> tetto +4%
-	LightColor light, 255, 205*(1.0+fvar), 105*(1.0+fvar)   ; arancio chiaro/giallo
+	LightColor light, 255, 235*(1.0+fvar), 210*(1.0+fvar)   ; bianco caldo (piu' chiaro)
 	LightRange light, CELL * 6.0 * (1.0 + fvar)             ; brillantezza +<=4% in fiammata
 	RenderWorld
+
+	; barra azioni nera a destra (il viewport 3D copre solo VIEW_W a sinistra)
+	Color 0, 0, 0
+	Rect VIEW_W, 0, BAR_W, 480, True
+
 	Color 255,255,255
 	Text 0, 0,  "DM 3D  party (" + px + "," + py + ")  facing " + pf
 	Text 0, 16, "ESC per uscire"
+
+	MoveUI()    ; frecce di movimento cliccabili (scrivono dm_command.txt -> CSBwin)
 
 	shotN = shotN + 1
 	If SHOT And shotN = 45 Then
@@ -452,6 +465,66 @@ While Not KeyHit(1)
 	Flip
 Wend
 End
+
+; =========================================================================
+; PAD DI MOVIMENTO (canale 3D -> 2D)
+; Frecce cliccabili in basso a destra. Al click scrivono un codice in
+; "dm_command.txt"; CSBwin lo legge ogni tick (Bridge_Tick) e lo inietta
+; nella coda mouse come azione gia' risolta -> il party si muove anche nel 2D.
+;   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
+; =========================================================================
+; Pad di movimento: disegna la grafica VERA di DM (mvbuttons.bmp, grafica 13
+; estratta da CSBwin) in basso a destra, e fa l'hit-test della griglia 3x2.
+; Layout (come DM):  [gira-sx][avanti][gira-dx] / [strafe-sx][indietro][strafe-dx]
+Function MoveUI()
+	If mvImg = 0 Then mvImg = LoadImage("mvbuttons.png")   ; PNG con alpha: nero gia' trasparente, 2x nearest (netto)
+	If hovImg = 0 Then hovImg = LoadImage("hover.png")     ; tinta bianca semi-trasparente per l'hover
+	If mvImg = 0 Then Return            ; immagine non trovata: nessun pad
+
+	iw = ImageWidth(mvImg) : ih = ImageHeight(mvImg)
+	px = VIEW_W + (BAR_W - iw)/2      ; centrato nella barra destra
+	py = 480 - ih - 14               ; in fondo alla barra (sopra: spazio per la scheda PG)
+	cw = iw/3 : ch = ih/2            ; dimensione cella (per hover e hit-test)
+
+	mx = MouseX() : my = MouseY() : clk = MouseHit(1)
+	over = (mx>=px And mx<px+iw And my>=py And my<py+ih)
+
+	; HOVER: schiarisce leggermente il fondo della cella sotto il mouse,
+	; disegnato PRIMA delle frecce (cosi' le frecce restano nitide sopra)
+	If over And hovImg <> 0 Then
+		DrawImage hovImg, px + ((mx-px)/cw)*cw, py + ((my-py)/ch)*ch
+	EndIf
+
+	DrawImage mvImg, px, py
+
+	If clk > 0 And over Then
+		code = MvCode((mx-px)/cw, (my-py)/ch)
+		If code > 0 Then SendCmd(code)
+	EndIf
+End Function
+
+; mappa cella (colonna,riga) -> codice movimento
+Function MvCode(col, row)
+	If row = 0 Then
+		If col = 0 Then Return 1     ; gira sinistra
+		If col = 1 Then Return 3     ; avanti
+		If col = 2 Then Return 2     ; gira destra
+	Else
+		If col = 0 Then Return 6     ; strafe sinistra
+		If col = 1 Then Return 5     ; indietro
+		If col = 2 Then Return 4     ; strafe destra
+	EndIf
+	Return 0
+End Function
+
+; scrive il comando di movimento per CSBwin
+Function SendCmd(code)
+	f = WriteFile("dm_command.txt")
+	If f<>0 Then
+		WriteLine f, Str(code)
+		CloseFile f
+	EndIf
+End Function
 
 ; --------------------------------------------------------- porta di legno 3D
 ; Anta in GEOMETRIA su un pivot (radice che scorre su): lastra texturizzata legno

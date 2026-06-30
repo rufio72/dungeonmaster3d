@@ -443,6 +443,7 @@ static void EmitJsonStr(FILE *f, const char *s, int maxLen)
 //   0=wall 1=floor 2=pit 3=stairs 4=door 5=teleporter 6=falsewall
 static void DumpPortraits(void);   // definita piu' sotto
 static void DumpPlates(void);      // pressure plate (sensori-pavimento, type 47)
+static void DumpTexts(void);       // scritte sui muri (record dbTEXT)
 
 static void DumpLevelMap(void)
 {
@@ -598,6 +599,75 @@ static void DumpPlates(void)
   fclose(f);
 
   printf("[bridge] attuatori livello %d: %d -> %s (diagnostica)\n",
+         (int)d.LoadedLevel, cnt, path);
+  fflush(stdout);
+}
+
+// ---- scritte sui muri (record dbTEXT) ------------------------------------
+// Le "scritte" di DM sono record dbTEXT posati su un lato di una cella-muro. La
+// stringa e' impacchettata a 5 bit (vedi DecodeText/GetText) usando il
+// dizionario di graphics.dat (graphic 0x22f); qui usiamo il decoder del gioco
+// per ottenerla in chiaro.
+//
+// Formato dm_texts_<N>.txt IDENTICO a dm_portraits (cosi' il viewer riusa lo
+// stesso piazzamento): prima riga = numero di scritte; poi per ognuna 4 righe
+//   fx              cella CALPESTABILE da cui si vede il muro
+//   fy
+//   dir             0=ovest 1=est 2=nord 3=sud (muro visto dalla cella)
+//   testo           stringa su singola riga
+// Esportiamo SOLO le scritte visibili (show!=0) e non vuote.
+static void DumpTexts(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_texts_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+
+  int W = d.width, H = d.height;
+  int   fxA[256], fyA[256], dirA[256];
+  char  txA[256][1024];
+  int cnt = 0;
+
+  for (int wy = 0; wy < H && cnt < 256; wy++)
+    for (int wx = 0; wx < W && cnt < 256; wx++)
+      for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbTEXT) continue;
+        DB2 *p = GetRecordAddressDB2(o);
+        if (p == NULL) continue;
+        if (p->show() == 0) continue;                       // solo scritte visibili
+
+        char text[1024]; text[0] = 0;
+        if (DecodeText(text, p, 1, (i32)sizeof(text) - 1) == -1) continue;
+        // appiattisci su una riga e togli spazi di troppo ai bordi
+        for (char *c = text; *c; c++) if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
+        char *s = text; while (*s == ' ') s++;
+        int L = (int)strlen(s); while (L > 0 && s[L-1] == ' ') s[--L] = 0;
+        if (L == 0) continue;                               // niente targhe vuote
+
+        // cella-muro (wx,wy) + lato -> cella calpestabile (fx,fy) + dir, come i ritratti
+        int sd = o.pos() & 3;
+        int dx = (int)d.DeltaX[sd], dy = (int)d.DeltaY[sd];
+        int fx = wx + dx, fy = wy + dy;
+        if (fx < 0 || fx >= W || fy < 0 || fy >= H) continue;
+        int dir = -1;
+        if      (dx ==  1 && dy ==  0) dir = 0;             // muro a ovest
+        else if (dx == -1 && dy ==  0) dir = 1;             // muro a est
+        else if (dx ==  0 && dy ==  1) dir = 2;             // muro a nord
+        else if (dx ==  0 && dy == -1) dir = 3;             // muro a sud
+        if (dir < 0) continue;
+
+        fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir;
+        snprintf(txA[cnt], sizeof(txA[cnt]), "%s", s);
+        cnt++;
+      }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%s\n", fxA[i], fyA[i], dirA[i], txA[i]);
+  fclose(f);
+
+  printf("[bridge] scritte (dbTEXT) livello %d: %d -> %s\n",
          (int)d.LoadedLevel, cnt, path);
   fflush(stdout);
 }
@@ -832,7 +902,7 @@ void Bridge_Tick(void)
   // pressure plate: (ri)esporta quando il livello caricato cambia. Robusto anche
   // se il dump-mappa (legato al cambio livello) non scatta su auto-resume.
   static int platesLevel = -999;
-  if (platesLevel != (int)d.LoadedLevel) { platesLevel = (int)d.LoadedLevel; DumpPlates(); }
+  if (platesLevel != (int)d.LoadedLevel) { platesLevel = (int)d.LoadedLevel; DumpPlates(); DumpTexts(); }
 
   // Estrazione grafiche porte: DISABILITATA — l'abbiamo gia' fatta (vedi doors/).
   // Riabilitare queste righe solo per ri-estrarre da capo le ante.

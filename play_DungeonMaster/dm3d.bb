@@ -21,6 +21,12 @@ Const NPORT = 24           ; ritratti dei campioni: portraits/00.png .. portrait
 Const PORT_W# = CELL*0.55  ; larghezza/altezza del quadro appeso al muro
 Const PORT_T# = 0.10       ; spessore della tavola (sottile)
 
+; targhe di marmo con le scritte (dm_texts_0.txt + plaque_0_<i>.png da gen_plaques.py)
+Const PLAQ_W# = CELL*0.74  ; larghezza targa (lungo il muro)
+Const PLAQ_H# = CELL*0.30  ; altezza targa
+Const PLAQ_T# = 0.10       ; spessore lastra
+Const PLAQ_OUT# = 0.06     ; di quanto la faccia esterna SPORGE dalla parete
+
 Const DOOR_T# = 0.30       ; mezzo-spessore dell'anta (asse "stretto")
 Const DOOR_W# = CELL/2.0 - 0.15   ; mezza-larghezza dell'anta (riempie il varco)
 Const DOOR_H# = CELL/2.0 - 0.08   ; mezza-altezza dell'anta (pavimento->soffitto)
@@ -306,6 +312,63 @@ If pf <> 0 Then
 		EndIf
 	Next
 	CloseFile pf
+EndIf
+
+; ----------------------------------------------------- targhe di marmo (scritte)
+; Le scritte sui muri di DM (sovraimpressione 2D nell'originale) diventano targhe
+; di marmo incise. Posizioni REALI dal ponte (dm_texts_0.txt, stesso formato dei
+; ritratti: fx, fy, dir, testo). Le texture le genera gen_plaques.py:
+;   plaque_0_<i>.png    marmo + scritta incisa (diffuse, slot 0)
+;   plaque_0_<i>_n.png  normal map + height nell'alpha (slot 1, DOT3 -> rilievo/parallax)
+; A differenza dei ritratti la lastra SPORGE di poco (PLAQ_OUT) e NON e' full-bright:
+; cosi' la torcia illumina l'incisione e il rilievo si vede.
+xf = ReadFile("dm_texts_0.txt")
+If xf <> 0 Then
+	xcount = Int(ReadLine$(xf))
+	For i = 0 To xcount-1
+		fx  = Int(ReadLine$(xf))
+		fy  = Int(ReadLine$(xf))
+		dir = Int(ReadLine$(xf))
+		txt$ = ReadLine$(xf)            ; testo (gia' inciso nella texture, qui non serve)
+		If fx >= 0 And fx < W And fy >= 0 And fy < H Then
+			cxw# = (W-1-fx)*CELL            ; stessa proiezione riflessa su X della camera
+			czw# = fy*CELL
+
+			ox# = 0.0 : oz# = 0.0
+			sx# = PLAQ_W/2.0 : sz# = PLAQ_W/2.0   ; uno dei due diventa lo spessore
+			; centro lastra: faccia esterna a CELL/2 + PLAQ_OUT (sporge dal muro)
+			near# = CELL/2.0 + PLAQ_OUT - PLAQ_T/2.0
+			If dir = 0 Then ox = +near : sx = PLAQ_T/2.0   ; muro a +X (griglia ovest)
+			If dir = 1 Then ox = -near : sx = PLAQ_T/2.0   ; muro a -X (griglia est)
+			If dir = 2 Then oz = -near : sz = PLAQ_T/2.0   ; muro a -Z (griglia nord)
+			If dir = 3 Then oz = +near : sz = PLAQ_T/2.0   ; muro a +Z (griglia sud)
+
+			plaq = CreateCube()
+			ScaleEntity plaq, sx, PLAQ_H/2.0, sz
+			PositionEntity plaq, cxw + ox, EYE, czw + oz
+			EntityColor plaq, 255, 255, 255
+
+			pd$ = "plaque_0_" + i
+			ptex = LoadTexture(pd$ + ".png")
+			If ptex <> 0 Then
+				; la texture e' top-left mentre GL campiona bottom-left: senza
+				; correzione la scritta esce capovolta (righe invertite). Stesso
+				; flip verticale dei ritratti (ScaleTexture 1,-1); l'orizzontale e'
+				; gia' giusto (NON usare -1 su X o le lettere escono specchiate).
+				ScaleTexture ptex, 1, -1
+				EntityTexture plaq, ptex, 0, 0                 ; diffuse marmo slot 0
+				pnrm = LoadTexture(pd$ + "_n.png")
+				If pnrm <> 0 Then
+					ScaleTexture pnrm, 1, -1                   ; stessa correzione della diffuse
+					TextureBlend pnrm, 4                       ; DOT3: normal+height (parallax)
+					EntityTexture plaq, pnrm, 0, 1             ; slot 1
+				EndIf
+			Else
+				EntityColor plaq, 210, 205, 195                ; marmo di ripiego se manca la texture
+			EndIf
+		EndIf
+	Next
+	CloseFile xf
 EndIf
 
 ; ---------------------------------------------------------------- loop live

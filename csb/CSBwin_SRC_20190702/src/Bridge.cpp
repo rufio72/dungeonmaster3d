@@ -533,13 +533,8 @@ static void DumpLevelMap(void)
 // calpestabile (fx,fy) + la direzione del muro vista da quella cella
 // (0=ovest 1=est 2=nord 3=sud) + l'indice ritratto. Cosi' il visualizzatore li
 // piazza esattamente sulla faccia di muro giusta, come nel gioco originale.
-static void DumpPortraits(void)
+static void EmitPortraitsText(FILE *f)
 {
-  char path[64];
-  snprintf(path, sizeof(path), "dm_portraits_%d.txt", (int)d.LoadedLevel);
-  FILE *f = fopen(path, "w");
-  if (f == NULL) return;
-
   int W = d.width, H = d.height;
   int fxA[256], fyA[256], dirA[256], ordA[256];
   int cnt = 0;
@@ -579,10 +574,17 @@ static void DumpPortraits(void)
   fprintf(f, "%d\n", cnt);
   for (int i = 0; i < cnt; i++)
     fprintf(f, "%d\n%d\n%d\n%d\n", fxA[i], fyA[i], dirA[i], ordA[i]);
-  fclose(f);
+}
 
-  printf("[bridge] ritratti livello %d: %d -> %s\n",
-         (int)d.LoadedLevel, cnt, path);
+static void DumpPortraits(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_portraits_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+  EmitPortraitsText(f);
+  fclose(f);
+  printf("[bridge] ritratti livello %d -> %s\n", (int)d.LoadedLevel, path);
   fflush(stdout);
 }
 
@@ -593,17 +595,11 @@ static void DumpPortraits(void)
 // type 127) la cella e' direttamente quella dove si trova l'attuatore.
 // Esportiamo le celle (coord. griglia, come dm_level) in dm_plates_<N>.txt:
 //   riga 1: N piastre; poi per ognuna due righe (x, y).
-static void DumpPlates(void)
+static void EmitPlatesText(FILE *f)
 {
-  char path[64];
-  snprintf(path, sizeof(path), "dm_plates_%d.txt", (int)d.LoadedLevel);
-  FILE *f = fopen(path, "w");
-  if (f == NULL) return;
-
   int W = d.width, H = d.height;
   // DIAGNOSTICA: dumpo TUTTI gli attuatori (cella, pos, actuatorType, value) per
   // identificare il tipo della pressure plate dalla posizione nota.
-  int cnt = 0;
   fprintf(f, "# x y pos type value (TUTTI gli attuatori, diagnostica)\n");
   for (int wy = 0; wy < H; wy++)
     for (int wx = 0; wx < W; wx++)
@@ -616,12 +612,19 @@ static void DumpPlates(void)
         if (p == NULL) continue;
         fprintf(f, "%d %d %d %d %d\n", wx, wy, (int)(o.pos() & 3),
                 (int)p->actuatorType(), (int)(p->value() & 511));
-        cnt++;
       }
-  fclose(f);
+}
 
-  printf("[bridge] attuatori livello %d: %d -> %s (diagnostica)\n",
-         (int)d.LoadedLevel, cnt, path);
+static void DumpPlates(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_plates_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+  EmitPlatesText(f);
+  fclose(f);
+  printf("[bridge] attuatori livello %d -> %s (diagnostica)\n",
+         (int)d.LoadedLevel, path);
   fflush(stdout);
 }
 
@@ -638,13 +641,8 @@ static void DumpPlates(void)
 //   dir             0=ovest 1=est 2=nord 3=sud (muro visto dalla cella)
 //   testo           stringa su singola riga
 // Esportiamo SOLO le scritte visibili (show!=0) e non vuote.
-static void DumpTexts(void)
+static void EmitTextsText(FILE *f)
 {
-  char path[64];
-  snprintf(path, sizeof(path), "dm_texts_%d.txt", (int)d.LoadedLevel);
-  FILE *f = fopen(path, "w");
-  if (f == NULL) return;
-
   int W = d.width, H = d.height;
   int   fxA[256], fyA[256], dirA[256];
   char  txA[256][1024];
@@ -687,10 +685,17 @@ static void DumpTexts(void)
   fprintf(f, "%d\n", cnt);
   for (int i = 0; i < cnt; i++)
     fprintf(f, "%d\n%d\n%d\n%s\n", fxA[i], fyA[i], dirA[i], txA[i]);
-  fclose(f);
+}
 
-  printf("[bridge] scritte (dbTEXT) livello %d: %d -> %s\n",
-         (int)d.LoadedLevel, cnt, path);
+static void DumpTexts(void)
+{
+  char path[64];
+  snprintf(path, sizeof(path), "dm_texts_%d.txt", (int)d.LoadedLevel);
+  FILE *f = fopen(path, "w");
+  if (f == NULL) return;
+  EmitTextsText(f);
+  fclose(f);
+  printf("[bridge] scritte (dbTEXT) livello %d -> %s\n", (int)d.LoadedLevel, path);
   fflush(stdout);
 }
 
@@ -912,6 +917,9 @@ static void Bridge_InjectCommand(int code)
 //   PING        ->  "OK 0"
 //   STATE       ->  "OK <n>" + n righe (formato dm_state.txt)
 //   MAP         ->  "OK <n>" + n righe (formato dm_level_<N>.txt, livello corrente)
+//   TEXTS       ->  "OK <n>" + n righe (formato dm_texts_<N>.txt)
+//   PLATES      ->  "OK <n>" + n righe (formato dm_plates_<N>.txt)
+//   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
 //   CMD <1..6>  ->  "OK 0"   (inietta il movimento nella coda mouse)
 //   SUB         ->  "OK 0"; da qui in poi il server invia spontaneamente
 //                   "PUSH <n>" + n righe (formato STATE) a ogni cambiamento
@@ -1046,6 +1054,21 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitLevelMapText);
+  }
+  else if (strcmp(line, "TEXTS") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitTextsText);
+  }
+  else if (strcmp(line, "PLATES") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitPlatesText);
+  }
+  else if (strcmp(line, "PORTRAITS") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitPortraitsText);
   }
   else if (strncmp(line, "CMD ", 4) == 0)
   {

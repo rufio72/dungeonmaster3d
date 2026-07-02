@@ -1,10 +1,12 @@
 ; dm3d.bb - Visualizzatore 3D di Dungeon Master (Fase 1, prototipo).
 ;
-; CLIENT del "ponte": legge la MAPPA del livello (dm_level_0.txt, una volta) e
-; lo STATO live (dm_state.txt, ogni frame) scritti dal motore CSBwin, e disegna
-; il dungeon in 3D piazzando la camera dove si trova il party.
+; CLIENT TCP del "ponte": si collega al server del bridge dentro CSBwin
+; (porta 5417) e da li' riceve la MAPPA (MAP, una volta), i dati statici
+; (STATE per i tipi porta, PORTRAITS, TEXTS) e lo stato live in PUSH (SUB).
+; I comandi di movimento tornano indietro sulla stessa connessione (CMD <n>).
+; Niente piu' polling dei file: il protocollo e' a righe, framed "OK/PUSH <n>".
 ;
-; Avviare DOPO che il gioco (CSBwin) e' entrato nel dungeon (cosi' i file esistono).
+; Si puo' avviare anche PRIMA del gioco: aspetta la connessione e il dungeon.
 ; ESC per uscire.
 
 ; Finestra: 3D pieno a sinistra (640x480) + barra nera azioni a destra (200px).
@@ -41,29 +43,37 @@ Global jambtex             ; stessa texture muro ma con UV scalate per gli stipi
 Global mvImg = 0           ; immagine dei pulsanti movimento (mvbuttons.png, estratta da DM)
 Global hovImg = 0          ; highlight semi-trasparente per la cella sotto il mouse
 
+; ------------------------------------------ connessione al ponte (server TCP)
+; Il bridge dentro CSBwin ascolta sulla porta 5417 (vedi Bridge.cpp). Risposte
+; framed: "OK <n>" + n righe (stessi formati dei vecchi .txt), "ERR <msg>" se
+; il dungeon non e' ancora caricato; con SUB arrivano push spontanei "PUSH <n>".
+Const BRIDGE_HOST$ = "127.0.0.1"
+Const BRIDGE_PORT  = 5417
+Global bridge = 0                 ; stream TCP verso CSBwin (0 = non connesso)
+Global brN                        ; n. righe payload dell'ultima risposta/push
+Dim brLine$(8191)                 ; payload dell'ultima risposta/push
+
 ; ----------------------------------------- attende la mappa (entra nel dungeon)
 W = 0 : H = 0
 While W <= 0 Or H <= 0
 	If KeyHit(1) Then End
-	mapf = ReadFile("dm_level_0.txt")
-	If mapf <> 0 Then
-		W = Int(ReadLine$(mapf))
-		H = Int(ReadLine$(mapf))
+	If BridgeReq("MAP") >= 2 Then
+		W = Int(brLine$(0))
+		H = Int(brLine$(1))
 		If W > 0 And W <= 64 And H > 0 And H <= 64 Then
 			Dim grid$(H)
 			For y = 0 To H-1
-				grid$(y) = ReadLine$(mapf)
+				grid$(y) = brLine$(2+y)
 			Next
 		Else
-			W = 0 : H = 0      ; file incompleto, riprova
+			W = 0 : H = 0      ; risposta incompleta, riprova
 		EndIf
-		CloseFile mapf
 	EndIf
 	If W <= 0 Then
 		Cls
 		Color 200,200,200
-		Text 20, 200, "In attesa... entra nel dungeon nel gioco 2D (CSBwin)"
-		Text 20, 220, "(ESC per uscire)"
+		Text 20, 200, "In attesa del gioco 2D (CSBwin, porta " + BRIDGE_PORT + ")..."
+		Text 20, 220, "entra nel dungeon; ESC per uscire"
 		Flip
 		Delay 300
 	EndIf
@@ -130,28 +140,23 @@ If floortexN <> 0 Then TextureBlend floortexN, 4
 Dim doorEnt(W*H)
 Dim doorBaseY#(W*H)
 Dim doorOpen#(W*H)
+Dim doorTarget#(W*H)       ; apertura bersaglio dall'ultimo PUSH (0=chiusa..1=su)
 
-; tipo di ogni porta (statico): letto UNA volta dal ponte (dm_state.txt) per
+; tipo di ogni porta (statico): letto UNA volta dal ponte (STATE via TCP) per
 ; scegliere lo stile in costruzione. -1 = sconosciuto (default: ferro).
 Dim doorTypeAt(W*H)
 For i = 0 To W*H-1 : doorTypeAt(i) = -1 : Next
-tf = ReadFile("dm_state.txt")
-If tf <> 0 Then
-	tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)        ; px, py
-	tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)        ; facing, level
-	tmc = Int(ReadLine$(tf))                         ; n. mostri
-	For m = 1 To tmc
-		tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf) : tj$ = ReadLine$(tf)
-	Next
-	tdc = Int(ReadLine$(tf))                         ; n. porte
+If BridgeReq("STATE") >= 6 Then
+	tk = 4                                           ; 0..3 = px,py,facing,level
+	tmc = Int(brLine$(tk)) : tk = tk + 1 + tmc*3     ; salta i mostri (3 righe l'uno)
+	tdc = Int(brLine$(tk)) : tk = tk + 1             ; n. porte
 	For m = 1 To tdc
-		ax = Int(ReadLine$(tf))
-		ay = Int(ReadLine$(tf))
-		az = Int(ReadLine$(tf))                      ; state (ignorato qui)
-		aty = Int(ReadLine$(tf))                     ; type
+		ax  = Int(brLine$(tk))
+		ay  = Int(brLine$(tk+1))                     ; tk+2 = state (ignorato qui)
+		aty = Int(brLine$(tk+3))                     ; type
+		tk = tk + 4
 		If ax >= 0 And ax < W And ay >= 0 And ay < H Then doorTypeAt(ay*W+ax) = aty
 	Next
-	CloseFile tf
 EndIf
 
 ; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
@@ -271,17 +276,18 @@ For i = 0 To NPORT-1
 	If porttex(i) <> 0 Then ScaleTexture porttex(i), 1, -1
 Next
 
-; Posizioni REALI dal ponte (dm_portraits_0.txt): un ritratto per riga-blocco
+; Posizioni REALI dal ponte (PORTRAITS via TCP): un ritratto per blocco di 4 righe
 ;   fx, fy (cella calpestabile)  +  dir muro (0=ovest 1=est 2=nord 3=sud)  +  ord
 ; Coordinate griglia identiche alla mappa, quindi stessa proiezione della camera.
-pf = ReadFile("dm_portraits_0.txt")
-If pf <> 0 Then
-	pcount = Int(ReadLine$(pf))
+If BridgeReq("PORTRAITS") >= 1 Then
+	pcount = Int(brLine$(0))
+	pk = 1
 	For i = 1 To pcount
-		fx  = Int(ReadLine$(pf))
-		fy  = Int(ReadLine$(pf))
-		dir = Int(ReadLine$(pf))
-		ord = Int(ReadLine$(pf))
+		fx  = Int(brLine$(pk))
+		fy  = Int(brLine$(pk+1))
+		dir = Int(brLine$(pk+2))
+		ord = Int(brLine$(pk+3))
+		pk = pk + 4
 		If fx >= 0 And fx < W And fy >= 0 And fy < H Then
 			cxw# = (W-1-fx)*CELL             ; mondo riflesso su X (come la camera)
 			czw# = fy*CELL
@@ -311,25 +317,25 @@ If pf <> 0 Then
 			EntityFX pic, 1                  ; full-bright: il volto resta leggibile
 		EndIf
 	Next
-	CloseFile pf
 EndIf
 
 ; ----------------------------------------------------- targhe di marmo (scritte)
 ; Le scritte sui muri di DM (sovraimpressione 2D nell'originale) diventano targhe
-; di marmo incise. Posizioni REALI dal ponte (dm_texts_0.txt, stesso formato dei
+; di marmo incise. Posizioni REALI dal ponte (TEXTS via TCP, stesso formato dei
 ; ritratti: fx, fy, dir, testo). Le texture le genera gen_plaques.py:
 ;   plaque_0_<i>.png    marmo + scritta incisa (diffuse, slot 0)
 ;   plaque_0_<i>_n.png  normal map + height nell'alpha (slot 1, DOT3 -> rilievo/parallax)
 ; A differenza dei ritratti la lastra SPORGE di poco (PLAQ_OUT) e NON e' full-bright:
 ; cosi' la torcia illumina l'incisione e il rilievo si vede.
-xf = ReadFile("dm_texts_0.txt")
-If xf <> 0 Then
-	xcount = Int(ReadLine$(xf))
+If BridgeReq("TEXTS") >= 1 Then
+	xcount = Int(brLine$(0))
+	xk = 1
 	For i = 0 To xcount-1
-		fx  = Int(ReadLine$(xf))
-		fy  = Int(ReadLine$(xf))
-		dir = Int(ReadLine$(xf))
-		txt$ = ReadLine$(xf)            ; testo (gia' inciso nella texture, qui non serve)
+		fx  = Int(brLine$(xk))
+		fy  = Int(brLine$(xk+1))
+		dir = Int(brLine$(xk+2))
+		txt$ = brLine$(xk+3)            ; testo (gia' inciso nella texture, qui non serve)
+		xk = xk + 4
 		If fx >= 0 And fx < W And fy >= 0 And fy < H Then
 			cxw# = (W-1-fx)*CELL            ; stessa proiezione riflessa su X della camera
 			czw# = fy*CELL
@@ -368,11 +374,14 @@ If xf <> 0 Then
 			EndIf
 		EndIf
 	Next
-	CloseFile xf
 EndIf
 
 ; ---------------------------------------------------------------- loop live
 px = W/2 : py = H/2 : pf = 0      ; default finche' non leggiamo lo stato
+
+; attiva il push: da qui in poi il server invia "PUSH <n>" + stato a ogni
+; cambiamento (movimento party, porte, periodico) senza che noi chiediamo nulla.
+BridgeReq("SUB")
 
 ; stato camera interpolato (movimento fluido)
 camStarted = 0
@@ -385,51 +394,63 @@ torchFlare# = 0.0   ; 0 = baseline arancio .. 1 = fiammata gialla intensa
 torchFlaring = 0    ; 0 = baseline, 1 = sta fiammeggiando
 
 While Not KeyHit(1)
-	; rilegge lo stato dinamico (puo' fallire se il file e' in scrittura: si tiene l'ultimo)
-	sf = ReadFile("dm_state.txt")
-	If sf <> 0 Then
-		nx = Int(ReadLine$(sf))
-		ny = Int(ReadLine$(sf))
-		nf = Int(ReadLine$(sf))
-		lv = Int(ReadLine$(sf))
-		If nx >= 0 And nx < W And ny >= 0 And ny < H Then
-			px = nx : py = ny : pf = nf
-		EndIf
-
-		; sezione mostri: la saltiamo (3 valori per mostro), poi le porte.
-		mcount = Int(ReadLine$(sf))
-		For m = 1 To mcount
-			junk = ReadLine$(sf) : junk = ReadLine$(sf) : junk = ReadLine$(sf)
-		Next
-
-		; sezione porte: x, y, state (0=aperta..4=chiusa, 5=foro), type (0/1).
-		dcount = Int(ReadLine$(sf))
-		For m = 1 To dcount
-			gx  = Int(ReadLine$(sf))
-			gy  = Int(ReadLine$(sf))
-			gst = Int(ReadLine$(sf))
-			gty = Int(ReadLine$(sf))
-			If gx >= 0 And gx < W And gy >= 0 And gy < H Then
-				idx = gy*W + gx
-				dr = doorEnt(idx)
-				If dr <> 0 Then
-					; apertura bersaglio: 4=chiusa->0, 0=aperta->1; 5 (foro)=tutta aperta
-					tOpen# = (4.0 - gst) / 4.0
-					If gst >= 5 Then tOpen = 1.0
-					If tOpen < 0.0 Then tOpen = 0.0
-					If tOpen > 1.0 Then tOpen = 1.0
-					; scorrimento fluido verso il bersaglio (portcullis: sale)
-					doorOpen#(idx) = doorOpen#(idx) + (tOpen - doorOpen#(idx)) * DOOR_SMOOTH
-					; muovo il PIVOT della porta: i figli (lastra/bande/borchie) seguono
-					wxd# = (W-1-gx)*CELL
-					wzd# = gy*CELL
-					PositionEntity dr, wxd, doorBaseY#(idx) + doorOpen#(idx)*CELL, wzd
-				EndIf
-			EndIf
-		Next
-
-		CloseFile sf
+	; riconnessione (se CSBwin e' stato chiuso/riaperto): riattiva anche il push
+	If bridge = 0 Then
+		If BridgeConnect() <> 0 Then BridgeReq("SUB")
 	EndIf
+
+	; drena TUTTO cio' che il server ha inviato (PUSH di stato, "OK 0" dei CMD)
+	; senza mai bloccare il frame: si legge solo se ci sono byte disponibili.
+	While bridge <> 0 And ReadAvail(bridge) > 0
+		hdr$ = ReadLine$(bridge)
+		If Eof(bridge) Then
+			CloseTCPStream bridge : bridge = 0     ; server sparito: riproveremo
+		Else
+			pn = BridgeRead(hdr$)
+			If Left$(hdr$, 4) = "PUSH" And pn >= 6 Then
+				nx = Int(brLine$(0))
+				ny = Int(brLine$(1))
+				nf = Int(brLine$(2))
+				lv = Int(brLine$(3))
+				If nx >= 0 And nx < W And ny >= 0 And ny < H Then
+					px = nx : py = ny : pf = nf
+				EndIf
+
+				; sezione mostri: la saltiamo (3 righe per mostro), poi le porte.
+				sk = 4
+				mcount = Int(brLine$(sk)) : sk = sk + 1 + mcount*3
+
+				; sezione porte: x, y, state (0=aperta..4=chiusa, 5=foro), type (0/1).
+				dcount = Int(brLine$(sk)) : sk = sk + 1
+				For m = 1 To dcount
+					gx  = Int(brLine$(sk))
+					gy  = Int(brLine$(sk+1))
+					gst = Int(brLine$(sk+2))
+					sk = sk + 4                     ; sk+3 = type (gia' noto)
+					If gx >= 0 And gx < W And gy >= 0 And gy < H Then
+						; apertura bersaglio: 4=chiusa->0, 0=aperta->1; 5 (foro)=aperta
+						tOpen# = (4.0 - gst) / 4.0
+						If gst >= 5 Then tOpen = 1.0
+						If tOpen < 0.0 Then tOpen = 0.0
+						If tOpen > 1.0 Then tOpen = 1.0
+						doorTarget#(gy*W+gx) = tOpen
+					EndIf
+				Next
+			EndIf
+		EndIf
+	Wend
+
+	; animazione porte OGNI frame (i PUSH arrivano ~16/s: qui si interpola a 60):
+	; scorrimento fluido del pivot verso il target (portcullis: sale).
+	For idx = 0 To W*H-1
+		dr = doorEnt(idx)
+		If dr <> 0 Then
+			doorOpen#(idx) = doorOpen#(idx) + (doorTarget#(idx) - doorOpen#(idx)) * DOOR_SMOOTH
+			wxd# = (W-1-(idx Mod W))*CELL
+			wzd# = (idx / W)*CELL
+			PositionEntity dr, wxd, doorBaseY#(idx) + doorOpen#(idx)*CELL, wzd
+		EndIf
+	Next
 
 	; --- target dalla cella/direzione del party ---
 	; mondo riflesso su X (Blitz3D left-handed) -> worldX = (W-1-gridX)*CELL,
@@ -517,7 +538,7 @@ While Not KeyHit(1)
 	Text 0, 0,  "DM 3D  party (" + px + "," + py + ")  facing " + pf
 	Text 0, 16, "ESC per uscire"
 
-	MoveUI()    ; frecce di movimento cliccabili (scrivono dm_command.txt -> CSBwin)
+	MoveUI()    ; frecce di movimento cliccabili (inviano "CMD <n>" via TCP a CSBwin)
 
 	shotN = shotN + 1
 	If SHOT And shotN = 45 Then
@@ -530,10 +551,54 @@ Wend
 End
 
 ; =========================================================================
+; CLIENT TCP DEL PONTE
+; =========================================================================
+; apre (o riapre) la connessione al server del bridge dentro CSBwin.
+; Ritorna lo stream (0 se il server non c'e': si riprova al giro dopo).
+Function BridgeConnect()
+	If bridge <> 0 Then Return bridge
+	bridge = OpenTCPStream(BRIDGE_HOST, BRIDGE_PORT)
+	Return bridge
+End Function
+
+; invia un comando e legge la risposta framed ("OK <n>" + n righe in brLine$).
+; Ritorna n (>=0) oppure -1 (ERR dal server, o connessione assente/caduta).
+; BLOCCANTE per la durata della risposta (ok: risposte piccole, server a 10ms).
+Function BridgeReq(cmd$)
+	brN = -1
+	If BridgeConnect() = 0 Then Return -1
+	WriteLine bridge, cmd$
+	hdr$ = ReadLine$(bridge)
+	If Eof(bridge) Then                        ; server sparito a meta' richiesta
+		CloseTCPStream bridge : bridge = 0
+		Return -1
+	EndIf
+	Return BridgeRead(hdr$)
+End Function
+
+; legge il payload di una risposta/push gia' intestata (hdr$ = "OK n"/"PUSH n")
+; dentro brLine$. Ritorna n; -1 se l'header e' un ERR o non riconosciuto.
+Function BridgeRead(hdr$)
+	brN = -1
+	If Left$(hdr$, 2) <> "OK" And Left$(hdr$, 4) <> "PUSH" Then Return -1
+	sp = Instr(hdr$, " ")
+	If sp = 0 Then Return -1
+	n = Int(Mid$(hdr$, sp+1))
+	If n < 0 Then n = 0
+	If n > 8191 Then n = 8191                  ; hard cap (mai col protocollo attuale)
+	For i = 0 To n-1
+		brLine$(i) = ReadLine$(bridge)
+	Next
+	brN = n
+	Return n
+End Function
+
+; =========================================================================
 ; PAD DI MOVIMENTO (canale 3D -> 2D)
-; Frecce cliccabili in basso a destra. Al click scrivono un codice in
-; "dm_command.txt"; CSBwin lo legge ogni tick (Bridge_Tick) e lo inietta
-; nella coda mouse come azione gia' risolta -> il party si muove anche nel 2D.
+; Frecce cliccabili in basso a destra. Al click inviano "CMD <codice>" al
+; bridge via TCP; CSBwin lo inietta nella coda mouse come azione gia'
+; risolta -> il party si muove anche nel 2D. La risposta "OK 0" viene
+; drenata dal loop principale insieme ai PUSH.
 ;   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
 ; =========================================================================
 ; Pad di movimento: disegna la grafica VERA di DM (mvbuttons.bmp, grafica 13
@@ -580,13 +645,9 @@ Function MvCode(col, row)
 	Return 0
 End Function
 
-; scrive il comando di movimento per CSBwin
+; invia il comando di movimento a CSBwin via TCP (la "OK 0" la drena il loop)
 Function SendCmd(code)
-	f = WriteFile("dm_command.txt")
-	If f<>0 Then
-		WriteLine f, Str(code)
-		CloseFile f
-	EndIf
+	If BridgeConnect() <> 0 Then WriteLine bridge, "CMD " + code
 End Function
 
 ; --------------------------------------------------------- porta di legno 3D

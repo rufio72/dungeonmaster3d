@@ -31,6 +31,19 @@
 #define mkdir(path, mode) _mkdir(path)
 #endif
 
+// Server TCP (Fase 2): solo POSIX per ora (su Windows servirebbe Winsock).
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#endif
+
+static void BridgeSrv_Tick(bool levelReady);   // definiti in fondo al file
+static void BridgeSrv_PushState(void);
+
 // ---- estrazione ritratti campioni ----------------------------------------
 // I ritratti NON sono in un file grafico: sono incorporati nel record del
 // personaggio (CHARDESC.portrait), 32x28 pixel a 4 bit (16 byte/riga, 28 righe),
@@ -445,6 +458,21 @@ static void DumpPortraits(void);   // definita piu' sotto
 static void DumpPlates(void);      // pressure plate (sensori-pavimento, type 47)
 static void DumpTexts(void);       // scritte sui muri (record dbTEXT)
 
+// Mappa del livello corrente in plain-text (stesso formato di dm_level_<N>.txt):
+// riga 1 = W, riga 2 = H, poi H righe di W cifre (0-6 = tipo cella). Scrive su
+// un FILE* qualsiasi cosi' la riusano sia il dump su file sia il server TCP.
+static void EmitLevelMapText(FILE *ft)
+{
+  int W = d.width, H = d.height;
+  fprintf(ft, "%d\n%d\n", W, H);
+  for (int y = 0; y < H; y++)
+  {
+    for (int x = 0; x < W; x++)
+      fputc('0' + ((GetCellFlags(x, y) >> 5) & 7), ft);
+    fputc('\n', ft);
+  }
+}
+
 static void DumpLevelMap(void)
 {
   char path[64];
@@ -483,13 +511,7 @@ static void DumpLevelMap(void)
   FILE *ft = fopen(tpath, "w");
   if (ft != NULL)
   {
-    fprintf(ft, "%d\n%d\n", W, H);
-    for (int y = 0; y < H; y++)
-    {
-      for (int x = 0; x < W; x++)
-        fputc('0' + ((GetCellFlags(x, y) >> 5) & 7), ft);
-      fputc('\n', ft);
-    }
+    EmitLevelMapText(ft);
     fclose(ft);
   }
 
@@ -785,10 +807,9 @@ static void EmitDoorsText(FILE *ft)
 // Variante plain-text dello stato, per Blitz3D (un valore per riga):
 //   px / py / facing / level / numMonsters / (per mostro: typeId,x,y)
 //   / numDoors / (per porta: x,y,state,type)
-static void DumpStateText(void)
+// Scrive su un FILE* qualsiasi: la usano sia dm_state.txt sia il server TCP.
+static void EmitStateText(FILE *ft)
 {
-  FILE *ft = fopen("dm_state.txt", "w");
-  if (ft == NULL) return;
   int px = d.partyX, py = d.partyY;
   fprintf(ft, "%d\n%d\n%d\n%d\n", px, py, (int)d.partyFacing, (int)d.LoadedLevel);
 
@@ -820,6 +841,13 @@ static void DumpStateText(void)
       }
 
   EmitDoorsText(ft);   // porte del livello (stato di apertura + tipo)
+}
+
+static void DumpStateText(void)
+{
+  FILE *ft = fopen("dm_state.txt", "w");
+  if (ft == NULL) return;
+  EmitStateText(ft);
   fclose(ft);
 }
 
@@ -845,31 +873,315 @@ static void DumpWorldState(void)
   fprintf(f, "  \"monsterRadius\": %d\n}\n", BRIDGE_MON_RADIUS);
   fclose(f);
 
-  DumpStateText();   // variante .txt per il client Blitz3D
+  DumpStateText();      // variante .txt per il client Blitz3D (compatibilita')
+  BridgeSrv_PushState(); // push dello stesso stato ai client TCP sottoscritti (SUB)
 
   printf("[bridge] tick=%d level=%d party=(%d,%d) facing=%s\n",
          (int)d.Time, (int)d.LoadedLevel, px, py, FacingName(facing));
   fflush(stdout);
 }
 
+// ---- canale INVERSO 3D -> 2D: iniezione comandi -----------------------------
+// Il comando di movimento entra nella coda mouse come AZIONE gia' risolta
+// (campo .num = codice), esattamente come fa un click reale dopo l'hit-test
+// (vedi OnMouseClick -> .num = D4W e HandleMouseEvents -> D6W = .num ->
+// TurnParty/MoveParty). Niente coordinate ne' contesto RESTARTABLE: il dispatch
+// normale del main loop applica il movimento col timing/cooldown corretti.
+//   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
+static void Bridge_InjectCommand(int code)
+{
+  if (code < 1 || code > 6) return;
+  int q = d.MouseQEnd + 1;
+  if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+  pMouseQueue[q].num = (ui16)code;
+  pMouseQueue[q].x = 0;
+  pMouseQueue[q].y = 0;
+  d.MouseQEnd = (i16)q;
+}
+
+// ===========================================================================
+// SERVER TCP (Fase 2) — il ponte risponde su una porta invece che su file.
+//
+// Design: NESSUN thread. Lo stato globale `d` e' leggibile solo sul thread
+// principale, quindi il server vive dentro Bridge_Tick (timer ~10ms): accept,
+// read, dispatch e write sono tutti NON-bloccanti — qualsiasi attesa qui
+// congelerebbe gioco e audio. I payload riusano gli emitter esistenti tramite
+// open_memstream() (FILE* in memoria), stessi formati dei .txt su file.
+//
+// Protocollo a righe (pensato per Blitz3D OpenTCPStream + ReadLine/WriteLine):
+//   PING        ->  "OK 0"
+//   STATE       ->  "OK <n>" + n righe (formato dm_state.txt)
+//   MAP         ->  "OK <n>" + n righe (formato dm_level_<N>.txt, livello corrente)
+//   CMD <1..6>  ->  "OK 0"   (inietta il movimento nella coda mouse)
+//   SUB         ->  "OK 0"; da qui in poi il server invia spontaneamente
+//                   "PUSH <n>" + n righe (formato STATE) a ogni cambiamento
+//   errori      ->  "ERR nolevel" (titolo/menu), "ERR badcmd", "ERR unknown"
+//
+// NOTA (modello condiviso): esiste UN SOLO party. Tutti i client vedono lo
+// stesso stato e un CMD di QUALSIASI client muove il party per tutti: in
+// questa fase il movimento e' unico, non per-client (scelta voluta).
+// ===========================================================================
+#ifndef _WIN32
+
+#define BRIDGE_PORT        5417        // override con env DM_BRIDGE_PORT
+#define BRIDGE_MAX_CLIENTS 8
+#define BRIDGE_INBUF       256
+#define BRIDGE_OUTBUF      (256*1024)
+
+typedef struct
+{
+  int   fd;                  // -1 = slot libero
+  char  in[BRIDGE_INBUF];    // accumulo della riga di comando in arrivo
+  int   inLen;
+  char *out;                 // coda di uscita, drenata non-bloccante per tick
+  int   outLen, outOff;
+  bool  sub;                 // sottoscritto al push dello stato (SUB)
+} BridgeClient;
+
+static int          bridgeListenFd = -2;   // -2 mai inizializzato, -1 disabilitato
+static BridgeClient bridgeClients[BRIDGE_MAX_CLIENTS];
+static bool         bridgeLevelReady = false;
+
+static void BridgeSrv_SetNonBlock(int fd)
+{
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl != -1) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static void BridgeSrv_Init(void)
+{
+  bridgeListenFd = -1;
+  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++) bridgeClients[i].fd = -1;
+
+  int port = BRIDGE_PORT;
+  const char *env = getenv("DM_BRIDGE_PORT");
+  if (env != NULL && atoi(env) > 0) port = atoi(env);
+
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof(a));
+  a.sin_family      = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  a.sin_port        = htons((unsigned short)port);
+  if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(fd, 4) != 0)
+  {
+    printf("[bridge] server: porta %d non disponibile, server disabilitato\n", port);
+    fflush(stdout);
+    close(fd);
+    return;
+  }
+  BridgeSrv_SetNonBlock(fd);
+  bridgeListenFd = fd;
+  printf("[bridge] server TCP in ascolto sulla porta %d\n", port);
+  fflush(stdout);
+}
+
+static void BridgeSrv_CloseClient(BridgeClient *c)
+{
+  if (c->fd >= 0) close(c->fd);
+  free(c->out);
+  c->fd = -1; c->out = NULL;
+  c->outLen = c->outOff = c->inLen = 0;
+  c->sub = false;
+}
+
+// Accoda dati in uscita. Se il buffer e' pieno il client e' troppo lento:
+// lo scolleghiamo (mai bloccare o accumulare all'infinito).
+static void BridgeSrv_Queue(BridgeClient *c, const char *data, size_t len)
+{
+  if (c->fd < 0 || len == 0) return;
+  if (c->out == NULL)
+  {
+    c->out = (char *)malloc(BRIDGE_OUTBUF);
+    if (c->out == NULL) { BridgeSrv_CloseClient(c); return; }
+    c->outLen = c->outOff = 0;
+  }
+  if (c->outOff > 0)                       // compatta la parte gia' inviata
+  {
+    memmove(c->out, c->out + c->outOff, (size_t)(c->outLen - c->outOff));
+    c->outLen -= c->outOff;
+    c->outOff  = 0;
+  }
+  if ((size_t)c->outLen + len > BRIDGE_OUTBUF) { BridgeSrv_CloseClient(c); return; }
+  memcpy(c->out + c->outLen, data, len);
+  c->outLen += (int)len;
+}
+
+// Cattura l'output di un emitter esistente in memoria (open_memstream) e lo
+// accoda framed: riga "<hdr> <numero-righe-payload>" seguita dal payload.
+static void BridgeSrv_QueueFramed(BridgeClient *c, const char *hdr, void (*emit)(FILE *))
+{
+  char  *buf = NULL;
+  size_t len = 0;
+  FILE  *m = open_memstream(&buf, &len);
+  if (m == NULL) { BridgeSrv_Queue(c, "ERR internal\n", 13); return; }
+  emit(m);
+  fclose(m);
+  int lines = 0;
+  for (size_t i = 0; i < len; i++) if (buf[i] == '\n') lines++;
+  char h[32];
+  int hl = snprintf(h, sizeof(h), "%s %d\n", hdr, lines);
+  BridgeSrv_Queue(c, h, (size_t)hl);
+  BridgeSrv_Queue(c, buf, len);
+  free(buf);
+}
+
+static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
+{
+  while (*line == ' ') line++;                       // trim sinistro
+  char *e = line + strlen(line);                     // trim destro (spazi + CR)
+  while (e > line && (e[-1] == ' ' || e[-1] == '\r')) *--e = 0;
+
+  if (strcmp(line, "PING") == 0)
+    BridgeSrv_Queue(c, "OK 0\n", 5);
+  else if (strcmp(line, "STATE") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitStateText);
+  }
+  else if (strcmp(line, "MAP") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitLevelMapText);
+  }
+  else if (strncmp(line, "CMD ", 4) == 0)
+  {
+    int code = atoi(line + 4);
+    if (!bridgeLevelReady || code < 1 || code > 6)
+      BridgeSrv_Queue(c, "ERR badcmd\n", 11);
+    else
+    {
+      Bridge_InjectCommand(code);
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+    }
+  }
+  else if (strcmp(line, "SUB") == 0)
+  {
+    c->sub = true;
+    BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (line[0] != 0)
+    BridgeSrv_Queue(c, "ERR unknown\n", 12);
+}
+
+// Push dello stato ("PUSH <n>" + payload STATE) ai client sottoscritti.
+// Chiamato da DumpWorldState, cioe' negli stessi momenti in cui oggi viene
+// riscritto dm_state.txt: movimento party, cambio livello, o periodico.
+static void BridgeSrv_PushState(void)
+{
+  bool any = false;
+  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
+    if (bridgeClients[i].fd >= 0 && bridgeClients[i].sub) { any = true; break; }
+  if (!any) return;
+
+  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
+  {
+    BridgeClient *c = &bridgeClients[i];
+    if (c->fd >= 0 && c->sub) BridgeSrv_QueueFramed(c, "PUSH", EmitStateText);
+  }
+}
+
+static void BridgeSrv_Tick(bool levelReady)
+{
+  bridgeLevelReady = levelReady;
+  if (bridgeListenFd == -2) BridgeSrv_Init();
+  if (bridgeListenFd < 0) return;
+
+  // nuovi client
+  for (;;)
+  {
+    int fd = accept(bridgeListenFd, NULL, NULL);
+    if (fd < 0) break;
+    int slot = -1;
+    for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
+      if (bridgeClients[i].fd < 0) { slot = i; break; }
+    if (slot < 0) { close(fd); continue; }           // pieno: rifiuta
+    BridgeSrv_SetNonBlock(fd);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    BridgeClient *c = &bridgeClients[slot];
+    c->fd = fd; c->inLen = 0; c->out = NULL;
+    c->outLen = c->outOff = 0; c->sub = false;
+  }
+
+  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
+  {
+    BridgeClient *c = &bridgeClients[i];
+    if (c->fd < 0) continue;
+
+    // input non-bloccante -> processa le righe complete
+    for (;;)
+    {
+      ssize_t n = recv(c->fd, c->in + c->inLen,
+                       (size_t)(BRIDGE_INBUF - 1 - c->inLen), 0);
+      if (n > 0)
+      {
+        c->inLen += (int)n;
+        char *nl;
+        while (c->fd >= 0 &&
+               (nl = (char *)memchr(c->in, '\n', (size_t)c->inLen)) != NULL)
+        {
+          *nl = 0;
+          BridgeSrv_HandleLine(c, c->in);
+          if (c->fd < 0) break;                      // chiuso durante il dispatch
+          int rest = (int)(c->inLen - (nl + 1 - c->in));
+          memmove(c->in, nl + 1, (size_t)rest);
+          c->inLen = rest;
+        }
+        if (c->fd < 0) break;
+        if (c->inLen >= BRIDGE_INBUF - 1) { BridgeSrv_CloseClient(c); break; } // riga troppo lunga
+      }
+      else if (n == 0) { BridgeSrv_CloseClient(c); break; }   // chiuso dal peer
+      else
+      {
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) BridgeSrv_CloseClient(c);
+        break;
+      }
+    }
+    if (c->fd < 0) continue;
+
+    // drena la coda di uscita (MSG_NOSIGNAL: niente SIGPIPE se il peer chiude)
+    while (c->outOff < c->outLen)
+    {
+      ssize_t n = send(c->fd, c->out + c->outOff,
+                       (size_t)(c->outLen - c->outOff), MSG_NOSIGNAL);
+      if (n > 0) c->outOff += (int)n;
+      else if (n < 0 && errno == EINTR) continue;
+      else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+      else { BridgeSrv_CloseClient(c); break; }
+    }
+    if (c->fd >= 0 && c->out != NULL && c->outOff == c->outLen)
+      c->outOff = c->outLen = 0;
+  }
+}
+
+#else  // _WIN32: server non disponibile (servirebbe Winsock), bridge solo su file
+
+static void BridgeSrv_Tick(bool) {}
+static void BridgeSrv_PushState(void) {}
+
+#endif
+
 // ---- hook dal game loop --------------------------------------------------
 void Bridge_Tick(void)
 {
-  // Niente da leggere finche' un livello REALE non e' caricato (titolo / menu):
-  // sulla schermata del titolo level=-1 e gli indici oggetti non sono pronti.
-  if (d.LoadedLevel < 0) return;
-  if (d.LevelCellFlags == NULL || d.width <= 0 || d.height <= 0) return;
-  if (d.pCurrentLevelObjectIndex == NULL) return;
+  // Il server TCP gira SEMPRE (anche al titolo/menu: risponde "ERR nolevel"
+  // finche' un livello reale non e' caricato). Il resto del ponte richiede
+  // il livello: al titolo level=-1 e gli indici oggetti non sono pronti.
+  bool levelReady = !(d.LoadedLevel < 0 ||
+                      d.LevelCellFlags == NULL || d.width <= 0 || d.height <= 0 ||
+                      d.pCurrentLevelObjectIndex == NULL);
+  BridgeSrv_Tick(levelReady);
+  if (!levelReady) return;
 
   // ---------------------------------------------------------------------
-  // Canale INVERSO 3D -> 2D: comando di movimento scritto da dm3d.
-  // dm3d scrive un codice in "dm_command.txt"; lo iniettiamo nella coda
-  // mouse come AZIONE gia' risolta (campo .num = codice), esattamente come
-  // fa un click reale dopo l'hit-test (vedi OnMouseClick -> .num = D4W e
-  // HandleMouseEvents -> D6W = .num -> TurnParty/MoveParty). Niente
-  // coordinate ne' contesto RESTARTABLE: il dispatch normale del main loop
-  // applica il movimento col timing/cooldown corretti.
-  //   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
+  // Canale INVERSO legacy su file: dm3d scrive un codice in "dm_command.txt".
+  // Resta per compatibilita' finche' dm3d non migra al comando TCP "CMD <n>"
+  // (stessa iniezione: vedi Bridge_InjectCommand).
   {
     FILE *cf = fopen("dm_command.txt", "r");
     if (cf != NULL)
@@ -878,15 +1190,7 @@ void Bridge_Tick(void)
       int n = fscanf(cf, "%d", &code);
       fclose(cf);
       remove("dm_command.txt");          // consuma (un comando per click)
-      if (n == 1 && code >= 1 && code <= 6)
-      {
-        int q = d.MouseQEnd + 1;
-        if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
-        pMouseQueue[q].num = (ui16)code;
-        pMouseQueue[q].x = 0;
-        pMouseQueue[q].y = 0;
-        d.MouseQEnd = (i16)q;
-      }
+      if (n == 1) Bridge_InjectCommand(code);
     }
   }
 

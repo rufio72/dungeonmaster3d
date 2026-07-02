@@ -7,6 +7,12 @@
 // Bridge_Tick() va chiamato dal game loop dopo ogni UIM_TIMER. Fa un dump solo
 // quando lo stato osservabile cambia (movimento/rotazione/cambio livello),
 // scrivendo dm_world_state.json nella cwd e una riga di sintesi su stdout.
+//
+// Fase 2: oltre ai file, il bridge e' anche un SERVER TCP (porta 5417, override
+// con env DM_BRIDGE_PORT) con protocollo a righe: PING / STATE / MAP /
+// CMD <1..6> / SUB (push spontaneo "PUSH <n>"). Non-bloccante, dentro il tick,
+// niente thread. Party UNICO condiviso: ogni CMD muove il party per tutti i
+// client. Dettagli nel blocco "SERVER TCP" di Bridge.cpp.
 
 #ifndef BRIDGE_H
 #define BRIDGE_H

@@ -653,26 +653,33 @@ void Channels::Play(SNDHEAD *sndHead, int numSample)
   int srcRate = sndHead->nSamplesPerSecond;
   if (srcRate <= 0) srcRate = SND_OUT_RATE;
 
+  // malloc+memcpy PRIMA del lock: mentre il device e' bloccato il callback
+  // audio non gira, e tenere allocazioni/copie sotto lock rischia underrun.
+  // Sotto lock restano solo scambi di puntatori/flag (costo ~zero).
+  ui8 *copy = (ui8 *)malloc((size_t)numSample);
+  if (copy == NULL) { UI_free(sndHead); return; }
+  memcpy(copy, sndHead->sample58, (size_t)numSample);
+
+  ui8 *oldData = NULL;   // buffer della voce precedente, liberato DOPO l'unlock
+
   SDL_LockAudioDevice(g_sndDev);
   int slot = -1;
   for (int v = 0; v < SND_VOICES; v++)
     if (!g_sndVoices[v].active) { slot = v; break; }
   if (slot >= 0)
   {
-    // Libera l'eventuale buffer della voce precedente (gia' terminata).
-    if (g_sndVoices[slot].data) { free(g_sndVoices[slot].data); g_sndVoices[slot].data = NULL; }
-    ui8 *copy = (ui8 *)malloc((size_t)numSample);
-    if (copy)
-    {
-      memcpy(copy, sndHead->sample58, (size_t)numSample);
-      g_sndVoices[slot].data   = copy;
-      g_sndVoices[slot].len    = numSample;
-      g_sndVoices[slot].pos    = 0.0;
-      g_sndVoices[slot].step   = (double)srcRate / (double)SND_OUT_RATE;
-      g_sndVoices[slot].active = true;
-    }
+    oldData = g_sndVoices[slot].data;      // gia' terminata: solo da liberare
+    g_sndVoices[slot].data   = copy;
+    g_sndVoices[slot].len    = numSample;
+    g_sndVoices[slot].pos    = 0.0;
+    g_sndVoices[slot].step   = (double)srcRate / (double)SND_OUT_RATE;
+    g_sndVoices[slot].active = true;
+    copy = NULL;                           // ora appartiene alla voce
   }
   SDL_UnlockAudioDevice(g_sndDev);
+
+  free(oldData);
+  free(copy);         // solo se nessuna voce libera (tutte le 8 occupate)
   UI_free(sndHead);   // i sample sono stati copiati: liberiamo l'originale
 }
 

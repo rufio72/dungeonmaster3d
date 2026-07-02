@@ -43,6 +43,20 @@
 
 static void BridgeSrv_Tick(bool levelReady);   // definiti in fondo al file
 static void BridgeSrv_PushState(void);
+static bool BridgeSrv_HasSubscribers(void);
+
+// Log per-dump (~16/s con SUB attivo) solo se richiesto: DM_BRIDGE_VERBOSE=1.
+// I messaggi una-tantum (mappa, ritratti, server in ascolto) restano sempre.
+static int Bridge_Verbose(void)
+{
+  static int v = -1;
+  if (v < 0)
+  {
+    const char *e = getenv("DM_BRIDGE_VERBOSE");
+    v = (e != NULL && *e != '\0' && *e != '0') ? 1 : 0;
+  }
+  return v;
+}
 
 // ---- estrazione ritratti campioni ----------------------------------------
 // I ritratti NON sono in un file grafico: sono incorporati nel record del
@@ -783,17 +797,22 @@ static void EmitChampions(FILE *f)
 // type = DB0::doorType() (0/1, due stili di porta per livello).  Il viewer le
 // anima facendole scorrere verso l'alto (portcullis), interpolando fra i tick.
 // Lettura pura: nessuna logica di gioco, il motore decide quando aprire/chiudere.
-static void EmitDoorsText(FILE *ft)
+// Le POSIZIONI (e il tipo) delle porte sono statiche per livello: solo lo
+// stato di apertura cambia. La scansione completa W*H + FindFirstDoor viene
+// quindi fatta UNA volta per livello (cache auto-invalidante); a ogni
+// emissione si rilegge soltanto GetCellFlags delle celle-porta note.
+static int   bridgeDoorLevel = -999;   // livello a cui si riferisce la cache
+static int   bridgeDoorCount = 0;
+static short bridgeDoorX[512], bridgeDoorY[512], bridgeDoorType[512];
+
+static void BuildDoorCache(void)
 {
   int W = d.width, H = d.height;
-  int dxA[512], dyA[512], stA[512], tyA[512];
-  int cnt = 0;
-  for (int y = 0; y < H && cnt < 512; y++)
-    for (int x = 0; x < W && cnt < 512; x++)
+  bridgeDoorCount = 0;
+  for (int y = 0; y < H && bridgeDoorCount < 512; y++)
+    for (int x = 0; x < W && bridgeDoorCount < 512; x++)
     {
-      int cf = GetCellFlags(x, y);
-      if (((cf >> 5) & 7) != roomDOOR) continue;
-      int state = cf & 7;
+      if (((GetCellFlags(x, y) >> 5) & 7) != roomDOOR) continue;
       int type = 0;
       RN dn = FindFirstDoor(x, y);
       if (dn != RNeof)
@@ -801,12 +820,24 @@ static void EmitDoorsText(FILE *ft)
         DB0 *door = GetRecordAddressDB0(dn);
         if (door != NULL) type = door->doorType();
       }
-      dxA[cnt] = x; dyA[cnt] = y; stA[cnt] = state; tyA[cnt] = type;
-      cnt++;
+      bridgeDoorX[bridgeDoorCount]    = (short)x;
+      bridgeDoorY[bridgeDoorCount]    = (short)y;
+      bridgeDoorType[bridgeDoorCount] = (short)type;
+      bridgeDoorCount++;
     }
-  fprintf(ft, "%d\n", cnt);
-  for (int i = 0; i < cnt; i++)
-    fprintf(ft, "%d\n%d\n%d\n%d\n", dxA[i], dyA[i], stA[i], tyA[i]);
+  bridgeDoorLevel = (int)d.LoadedLevel;
+}
+
+static void EmitDoorsText(FILE *ft)
+{
+  if (bridgeDoorLevel != (int)d.LoadedLevel) BuildDoorCache();
+
+  fprintf(ft, "%d\n", bridgeDoorCount);
+  for (int i = 0; i < bridgeDoorCount; i++)
+    fprintf(ft, "%d\n%d\n%d\n%d\n",
+            (int)bridgeDoorX[i], (int)bridgeDoorY[i],
+            GetCellFlags(bridgeDoorX[i], bridgeDoorY[i]) & 7,
+            (int)bridgeDoorType[i]);
 }
 
 // Variante plain-text dello stato, per Blitz3D (un valore per riga):
@@ -818,32 +849,30 @@ static void EmitStateText(FILE *ft)
   int px = d.partyX, py = d.partyY;
   fprintf(ft, "%d\n%d\n%d\n%d\n", px, py, (int)d.partyFacing, (int)d.LoadedLevel);
 
-  // conta + elenca i mostri nel raggio
+  // mostri nel raggio: UN solo passaggio (raccoglie, poi stampa conteggio+lista)
   int x0 = px - BRIDGE_MON_RADIUS, x1 = px + BRIDGE_MON_RADIUS;
   int y0 = py - BRIDGE_MON_RADIUS, y1 = py + BRIDGE_MON_RADIUS;
   if (x0 < 0) x0 = 0;
   if (y0 < 0) y0 = 0;
   if (x1 >= d.width)  x1 = d.width - 1;
   if (y1 >= d.height) y1 = d.height - 1;
+  short mtA[512], mxA[512], myA[512];
   int count = 0;
-  for (int y = y0; y <= y1; y++)
-    for (int x = x0; x <= x1; x++)
-      for (RN o = FindFirstObject(x, y); o != RNeof; o = GetDBRecordLink(o))
-      {
-        if (o.dbType() != dbMONSTER) continue;
-        DB4 *m = GetRecordAddressDB4(o);
-        if (m != NULL && !m->invisible()) count++;
-      }
-  fprintf(ft, "%d\n", count);
-  for (int y = y0; y <= y1; y++)
-    for (int x = x0; x <= x1; x++)
+  for (int y = y0; y <= y1 && count < 512; y++)
+    for (int x = x0; x <= x1 && count < 512; x++)
       for (RN o = FindFirstObject(x, y); o != RNeof; o = GetDBRecordLink(o))
       {
         if (o.dbType() != dbMONSTER) continue;
         DB4 *m = GetRecordAddressDB4(o);
         if (m == NULL || m->invisible()) continue;
-        fprintf(ft, "%d\n%d\n%d\n", (int)m->monsterType(), x, y);
+        mtA[count] = (short)m->monsterType();
+        mxA[count] = (short)x;
+        myA[count] = (short)y;
+        if (++count >= 512) break;
       }
+  fprintf(ft, "%d\n", count);
+  for (int i = 0; i < count; i++)
+    fprintf(ft, "%d\n%d\n%d\n", (int)mtA[i], (int)mxA[i], (int)myA[i]);
 
   EmitDoorsText(ft);   // porte del livello (stato di apertura + tipo)
 }
@@ -859,31 +888,42 @@ static void DumpStateText(void)
 // ---- STATO DINAMICO per-tick (leggero) -----------------------------------
 static void DumpWorldState(void)
 {
-  FILE *f = fopen("dm_world_state.json", "w");
-  if (f == NULL) return;
-
   int facing = d.partyFacing, px = d.partyX, py = d.partyY;
 
-  fprintf(f, "{\n");
-  fprintf(f, "  \"tick\": %d,\n", (int)d.Time);
-  fprintf(f, "  \"level\": %d,\n", (int)d.LoadedLevel);
-  fprintf(f, "  \"map\": \"dm_level_%d.json\",\n", (int)d.LoadedLevel);
-  fprintf(f, "  \"party\": { \"x\": %d, \"y\": %d, \"facing\": %d, "
-             "\"facingName\": \"%s\" },\n",
-          px, py, facing, FacingName(facing));
+  // I file sono il canale LEGACY: con almeno un client SUB collegato lo stato
+  // viaggia sul push TCP e riscrivere json+txt ~16 volte/s sarebbe solo I/O
+  // sprecato (misurato: ~350 write-syscall/s a riposo). Senza sottoscrittori
+  // il comportamento su file resta identico a prima.
+  if (!BridgeSrv_HasSubscribers())
+  {
+    FILE *f = fopen("dm_world_state.json", "w");
+    if (f != NULL)
+    {
+      fprintf(f, "{\n");
+      fprintf(f, "  \"tick\": %d,\n", (int)d.Time);
+      fprintf(f, "  \"level\": %d,\n", (int)d.LoadedLevel);
+      fprintf(f, "  \"map\": \"dm_level_%d.json\",\n", (int)d.LoadedLevel);
+      fprintf(f, "  \"party\": { \"x\": %d, \"y\": %d, \"facing\": %d, "
+                 "\"facingName\": \"%s\" },\n",
+              px, py, facing, FacingName(facing));
 
-  EmitChampions(f);        // termina con "],\n"
-  EmitMonstersNearby(f);   // termina con "],\n"
+      EmitChampions(f);        // termina con "],\n"
+      EmitMonstersNearby(f);   // termina con "],\n"
 
-  fprintf(f, "  \"monsterRadius\": %d\n}\n", BRIDGE_MON_RADIUS);
-  fclose(f);
+      fprintf(f, "  \"monsterRadius\": %d\n}\n", BRIDGE_MON_RADIUS);
+      fclose(f);
+    }
+    DumpStateText();           // variante .txt per i client su file
+  }
 
-  DumpStateText();      // variante .txt per il client Blitz3D (compatibilita')
-  BridgeSrv_PushState(); // push dello stesso stato ai client TCP sottoscritti (SUB)
+  BridgeSrv_PushState();       // push ai client TCP sottoscritti (SUB)
 
-  printf("[bridge] tick=%d level=%d party=(%d,%d) facing=%s\n",
-         (int)d.Time, (int)d.LoadedLevel, px, py, FacingName(facing));
-  fflush(stdout);
+  if (Bridge_Verbose())
+  {
+    printf("[bridge] tick=%d level=%d party=(%d,%d) facing=%s\n",
+           (int)d.Time, (int)d.LoadedLevel, px, py, FacingName(facing));
+    fflush(stdout);
+  }
 }
 
 // ---- canale INVERSO 3D -> 2D: iniezione comandi -----------------------------
@@ -1090,21 +1130,43 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
     BridgeSrv_Queue(c, "ERR unknown\n", 12);
 }
 
+// C'e' almeno un client sottoscritto (SUB)? Decide anche se i dump su file
+// legacy servono ancora (vedi DumpWorldState).
+static bool BridgeSrv_HasSubscribers(void)
+{
+  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
+    if (bridgeClients[i].fd >= 0 && bridgeClients[i].sub) return true;
+  return false;
+}
+
 // Push dello stato ("PUSH <n>" + payload STATE) ai client sottoscritti.
-// Chiamato da DumpWorldState, cioe' negli stessi momenti in cui oggi viene
-// riscritto dm_state.txt: movimento party, cambio livello, o periodico.
+// Il payload e' IDENTICO per tutti: lo si serializza UNA volta e lo si accoda
+// a ogni client, invece di rieseguire EmitStateText (scansione mostri + porte)
+// per ciascuno. Chiamato da DumpWorldState: movimento, cambio livello, periodico.
 static void BridgeSrv_PushState(void)
 {
-  bool any = false;
-  for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
-    if (bridgeClients[i].fd >= 0 && bridgeClients[i].sub) { any = true; break; }
-  if (!any) return;
+  if (!BridgeSrv_HasSubscribers()) return;
+
+  char  *buf = NULL;
+  size_t len = 0;
+  FILE  *m = open_memstream(&buf, &len);
+  if (m == NULL) return;
+  EmitStateText(m);
+  fclose(m);
+
+  int lines = 0;
+  for (size_t i = 0; i < len; i++) if (buf[i] == '\n') lines++;
+  char hdr[32];
+  int hl = snprintf(hdr, sizeof(hdr), "PUSH %d\n", lines);
 
   for (int i = 0; i < BRIDGE_MAX_CLIENTS; i++)
   {
     BridgeClient *c = &bridgeClients[i];
-    if (c->fd >= 0 && c->sub) BridgeSrv_QueueFramed(c, "PUSH", EmitStateText);
+    if (c->fd < 0 || !c->sub) continue;
+    BridgeSrv_Queue(c, hdr, (size_t)hl);
+    BridgeSrv_Queue(c, buf, len);
   }
+  free(buf);
 }
 
 static void BridgeSrv_Tick(bool levelReady)
@@ -1186,6 +1248,7 @@ static void BridgeSrv_Tick(bool levelReady)
 
 static void BridgeSrv_Tick(bool) {}
 static void BridgeSrv_PushState(void) {}
+static bool BridgeSrv_HasSubscribers(void) { return false; }
 
 #endif
 
@@ -1201,21 +1264,9 @@ void Bridge_Tick(void)
   BridgeSrv_Tick(levelReady);
   if (!levelReady) return;
 
-  // ---------------------------------------------------------------------
-  // Canale INVERSO legacy su file: dm3d scrive un codice in "dm_command.txt".
-  // Resta per compatibilita' finche' dm3d non migra al comando TCP "CMD <n>"
-  // (stessa iniezione: vedi Bridge_InjectCommand).
-  {
-    FILE *cf = fopen("dm_command.txt", "r");
-    if (cf != NULL)
-    {
-      int code = 0;
-      int n = fscanf(cf, "%d", &code);
-      fclose(cf);
-      remove("dm_command.txt");          // consuma (un comando per click)
-      if (n == 1) Bridge_InjectCommand(code);
-    }
-  }
+  // Canale inverso: SOLO via TCP ("CMD <n>" -> Bridge_InjectCommand). Il
+  // vecchio polling di "dm_command.txt" costava una open() fallita a OGNI
+  // tick (~100/s) ed e' stato rimosso: dm3d e' migrato al comando TCP.
 
   // Esporta i ritratti dei campioni una volta (qui graphics.dat e' caricato).
   // Ritenta finche' non ne salva almeno uno.

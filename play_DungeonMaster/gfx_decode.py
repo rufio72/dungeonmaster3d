@@ -17,6 +17,37 @@ def load_palette(path):
         pal.append((255, 0, 255))
     return pal
 
+# Post-processing per la cartella invgfx (schermata inventario):
+#  - COLORKEY: il 2D blitta alcune grafiche con un indice-colore trasparente
+#    (ultimo parametro di BLT2Viewport): g40 (menu resurrect) usa l'indice 6,
+#    g27 (griglia name-entry) l'indice 4. Qui azzeriamo l'alpha di quel colore.
+#  - FLIP: DrawImageRect dell'engine campiona il rettangolo sorgente
+#    dall'immagine SPECCHIATA verticalmente (origine GL; verificato con
+#    test_atlas.bb), quindi per atlanti e cornici scriviamo anche una copia
+#    pre-specchiata gNf.png: campionata coi rect top-origin esce dritta.
+# colorkey = 4° parametro dei blit del 2D: g40/g27 (BLT2Viewport), scudi
+# 37-39 (BLT2Screen param 10), freccia pos/dir 28 (TAG0088b2 param 12)
+COLORKEY = {40: 6, 27: 4, 37: 10, 38: 10, 39: 10, 28: 12,
+            20: 8, 30: 12, 31: 12, 32: 12}   # pannello FOOD/WATER
+FLIPPED  = (8, 28, 33, 34, 35, 37, 38, 39, 42, 43, 44, 45, 46, 47, 48)
+# SLICES: grafiche affettate in celle-PNG separate (gNc<i>.png) da disegnare
+# con DrawImage (rispetta l'alpha; DrawImageRect e' una copia raw che
+# schiaccerebbe i pixel trasparenti sul fondo). g28 = figurine pos/dir:
+# passo 19, ma la CELLA del marching-order e' 18x13 (wRectPos1454) — il 2D
+# ritaglia il blit alla cella, quindi affettiamo 18x13 per non sbordare.
+SLICES   = {28: (19, 18, 13)}      # (passo, larghezza, altezza)
+
+def postprocess(img, N, pal):
+    if N in COLORKEY:
+        r, g, b = pal[COLORKEY[N]]
+        px = img.load()
+        for y in range(img.height):
+            for x in range(img.width):
+                p = px[x, y]
+                if p[0] == r and p[1] == g and p[2] == b:
+                    px[x, y] = (r, g, b, 0)
+    return img
+
 def decode(raw, w, h, stride, pal):
     img = Image.new("RGBA", (w, h))
     px = img.load()
@@ -40,10 +71,13 @@ def decode(raw, w, h, stride, pal):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "."
-    scale = int(sys.argv[2]) if len(sys.argv) > 2 else 4
+    scale = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
     pal = load_palette(os.path.join(base, "palette.txt"))
     man = glob.glob(os.path.join(base, "*.txt"))
-    man = [m for m in man if os.path.basename(m) not in ("palette.txt", "anchor.txt")]
+    # esclusi: palette e file di METADATI (non-manifest) esportati dal bridge
+    skip = ("palette.txt", "anchor.txt", "rects.txt",
+            "icondisplay.txt", "layout.txt")
+    man = [m for m in man if os.path.basename(m) not in skip]
     if not man:
         print("nessun manifest in", base); return
     n = 0
@@ -53,9 +87,22 @@ def main():
             continue
         N, w, h, stride = (int(x) for x in p[:4])
         raw = open(os.path.join(base, "g%d.raw" % N), "rb").read()
-        img = decode(raw, w, h, stride, pal)
+        img = postprocess(decode(raw, w, h, stride, pal), N, pal)
+        big = img.resize((int(round(w*scale)), int(round(h*scale))), Image.NEAREST)
         out = os.path.join(base, "g%d.png" % N)
-        img.resize((w*scale, h*scale), Image.NEAREST).save(out)
+        big.save(out)
+        if N in FLIPPED:
+            big.transpose(Image.FLIP_TOP_BOTTOM).save(
+                os.path.join(base, "g%df.png" % N))
+        if N in SLICES:
+            pitch, cw, ch = SLICES[N]
+            k = 0
+            for x0 in range(0, w - cw + 1, pitch):
+                cell = img.crop((x0, 0, x0 + cw, ch))
+                cell.resize((int(round(cw*scale)), int(round(ch*scale))),
+                            Image.NEAREST).save(
+                    os.path.join(base, "g%dc%d.png" % (N, k)))
+                k += 1
         print("g%d %dx%d -> %s" % (N, w, h, os.path.basename(out)))
         n += 1
     print("decodificate:", n, "in", base)

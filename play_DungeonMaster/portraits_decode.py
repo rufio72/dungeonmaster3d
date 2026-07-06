@@ -10,12 +10,19 @@
 #   portraits/portrait_NN.png      -> i 24 ritratti (32x29), ingranditi x8
 #
 # Atlante = 8 colonne x 3 righe, ogni cella 32x29 (24 campioni).
-import os
+#
+# Uso: portraits_decode.py [scala] [prefisso]
+#   default:              scala 8, output portrait_NN.png (riferimento)
+#   per l'HUD del viewer:  portraits_decode.py 2.75 hud_
+#     -> portraits/hud_NN.png 88x80 (32x29 * 2.75, NEAREST: pixel-art nitida)
+#     e' il mini-ritratto ORIGINALE DM del box campione (ANALISI_HUD_3D.md §6)
+import os, sys
 from PIL import Image
 
 CELL_W, CELL_H = 32, 29
 COLS, ROWS = 8, 3
-SCALE = 8
+SCALE = float(sys.argv[1]) if len(sys.argv) > 1 else 8.0
+PREFIX = sys.argv[2] if len(sys.argv) > 2 else "portrait_"
 HIGH_NIBBLE_FIRST = True   # se i colori sono "sfasati" prova a metterlo False
 
 def load_palette(path):
@@ -63,8 +70,9 @@ def main():
             if x0+CELL_W > w or y0+CELL_H > h:
                 continue
             cell = atlas.crop((x0, y0, x0+CELL_W, y0+CELL_H))
-            out = os.path.join(base, "portrait_%02d.png" % n)
-            cell.resize((CELL_W*SCALE, CELL_H*SCALE), Image.NEAREST).save(out)
+            out = os.path.join(base, "%s%02d.png" % (PREFIX, n))
+            cell.resize((int(round(CELL_W*SCALE)), int(round(CELL_H*SCALE))),
+                        Image.NEAREST).save(out)
             n += 1
     print("ritratti salvati:", n)
 

@@ -44,6 +44,7 @@
 static void BridgeSrv_Tick(bool levelReady);   // definiti in fondo al file
 static void BridgeSrv_PushState(void);
 static bool BridgeSrv_HasSubscribers(void);
+static void EmitChampsText(FILE *ft);          // sezione CHAMPS del push (HUD)
 
 // Log per-dump (~16/s con SUB attivo) solo se richiesto: DM_BRIDGE_VERBOSE=1.
 // I messaggi una-tantum (mappa, ritratti, server in ascolto) restano sempre.
@@ -370,6 +371,130 @@ static void Bridge_DumpPalette(const char *folder)
   return saved;
 }
 
+// ---- estrazione grafiche INVENTARIO (schermata specchio/scheda campione) --
+// Tutto cio' che serve a dm3d per replicare la VERA schermata inventario
+// (vedi ANALISI_SCHEDA_CAMPIONI.md):
+//   17       pannello/manichino (sfondo, riempie il viewport 224x136)
+//   40       pannello bottoni RESURRECT/RE-INCARNATE/CANCEL
+//   42..48   7 atlanti icone oggetti (celle 16x16, 16 colonne)
+//   33/34/35 cornici slot (normale/"ouch"/mano che attacca)
+//   37/38/39 icone shield, 28 icona pos/dir, 8 box campione morto
+//   27       griglia lettere del name-entry (REINCARNATE, fase 3)
+// Metadati (non-grafiche, esclusi dal decoder):
+//   icondisplay.txt  46 righe "x y" (0-7 mani, 8-37 slot inventario, 38-45 chest)
+//   layout.txt       rect di g40 nel viewport (wRectPos926), rect schermo del
+//                    viewport (Word28), i bottoni RRC di Buttons18372 (spazio
+//                    mouse: code x1 x2 y1 y2) e la tabella Word612 degli atlanti
+[[maybe_unused]] static int Bridge_ExportInvGfx(void)
+{
+  // 20/30/31/32 = pannello FOOD/WATER (box, label FOOD, label WATER, veleno)
+  // 9 = sfondo pannello magia (rune/backspace/cast, blit su Word12 quando
+  //     viene selezionato un caster — SelectMagicCaster, Magic.cpp:728)
+  static const int gfxList[] =
+    { 8, 9, 17, 20, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40,
+      42, 43, 44, 45, 46, 47, 48 };
+
+  mkdir("invgfx", 0755);
+  FILE *m = fopen("invgfx/gfx.txt", "w");
+  if (m == NULL) return 0;
+  int saved = 0;
+  for (size_t i = 0; i < sizeof(gfxList) / sizeof(gfxList[0]); i++)
+    saved += Bridge_DumpGfx("invgfx", m, gfxList[i]);
+  fclose(m);
+  if (saved == 0) return 0;              // graphics.dat non pronto: ritenta
+  Bridge_DumpPalette("invgfx");
+
+  FILE *f = fopen("invgfx/icondisplay.txt", "w");
+  if (f != NULL)
+  {
+    for (int i = 0; i < 46; i++)
+      fprintf(f, "%d %d\n", (int)d.IconDisplay[i].pixelX,
+                            (int)d.IconDisplay[i].pixelY);
+    fclose(f);
+  }
+
+  FILE *lf = fopen("invgfx/layout.txt", "w");
+  if (lf != NULL)
+  {
+    fprintf(lf, "g40 %d %d %d %d\n",
+            (int)d.wRectPos926.w.x1, (int)d.wRectPos926.w.x2,
+            (int)d.wRectPos926.w.y1, (int)d.wRectPos926.w.y2);
+    fprintf(lf, "viewport %d %d %d %d\n",
+            (int)d.Word28[0], (int)d.Word28[1],
+            (int)d.Word28[2], (int)d.Word28[3]);
+    // pannello food/water: destinazioni delle label (il box g20 usa lo
+    // stesso rect di g40, wRectPos926, gia' esportato sopra)
+    fprintf(lf, "g30 %d %d %d %d\n",
+            (int)d.wRectPos950.w.x1, (int)d.wRectPos950.w.x2,
+            (int)d.wRectPos950.w.y1, (int)d.wRectPos950.w.y2);
+    fprintf(lf, "g31 %d %d %d %d\n",
+            (int)d.wRectPos958.w.x1, (int)d.wRectPos958.w.x2,
+            (int)d.wRectPos958.w.y1, (int)d.wRectPos958.w.y2);
+    fprintf(lf, "g32 %d %d %d %d\n",
+            (int)d.wRectPos966.w.x1, (int)d.wRectPos966.w.x2,
+            (int)d.wRectPos966.w.y1, (int)d.wRectPos966.w.y2);
+    for (int i = 0; i < 4; i++)
+    {
+      if (d.Buttons18372[i].word0 == 0) break;
+      fprintf(lf, "button %d %d %d %d %d\n",
+              (int)d.Buttons18372[i].word0,
+              (int)d.Buttons18372[i].xMin, (int)d.Buttons18372[i].xMax,
+              (int)d.Buttons18372[i].yMin, (int)d.Buttons18372[i].yMax);
+    }
+    fprintf(lf, "word612");
+    for (int i = 0; i < 7; i++) fprintf(lf, " %d", (int)d.Word612[i]);
+    fprintf(lf, "\n");
+    // button-list dell'inventario aperto (SecondaryButtonList = Buttons17760):
+    // 38 slot possession, ognuno con codice + rect (spazio mouse 2D). Serve al
+    // 3D per il drag-and-drop: iniettare il click sullo slot col codice reale.
+    for (int i = 0; i < 38; i++)
+    {
+      if (d.Buttons17760[i].word0 == 0) break;
+      fprintf(lf, "ibutton %d %d %d %d %d %d\n",
+              (int)d.Buttons17760[i].word0,
+              (int)d.Buttons17760[i].xMin, (int)d.Buttons17760[i].xMax,
+              (int)d.Buttons17760[i].yMin, (int)d.Buttons17760[i].yMax,
+              (int)d.Buttons17760[i].button);
+    }
+    // quadrato marching-order: i 4 rect-cella (spazio schermo 2D; il 3D usa
+    // solo la geometria RELATIVA fra le celle) — Character.cpp:1460
+    for (int i = 0; i < 4; i++)
+      fprintf(lf, "march %d %d %d %d\n",
+              (int)d.wRectPos1454[i].w.x1, (int)d.wRectPos1454[i].w.x2,
+              (int)d.wRectPos1454[i].w.y1, (int)d.wRectPos1454[i].w.y2);
+    // barra magie: rect del pannello g9 (Word12, SelectMagicCaster) e bottoni
+    // rune/backspace/cast di Buttons18060 (spazio mouse: code x1 x2 y1 y2,
+    // codici 101-106 rune, 107 backspace, 108 cast — Magic.cpp:701,556)
+    fprintf(lf, "word12 %d %d %d %d\n",
+            (int)((RectPos *)d.Word12)->w.x1, (int)((RectPos *)d.Word12)->w.x2,
+            (int)((RectPos *)d.Word12)->w.y1, (int)((RectPos *)d.Word12)->w.y2);
+    for (int i = 0; i < 9; i++)
+    {
+      if (d.Buttons18060[i].word0 == 0) break;
+      fprintf(lf, "mbutton %d %d %d %d %d\n",
+              (int)d.Buttons18060[i].word0,
+              (int)d.Buttons18060[i].xMin, (int)d.Buttons18060[i].xMax,
+              (int)d.Buttons18060[i].yMin, (int)d.Buttons18060[i].yMax);
+    }
+    fclose(lf);
+  }
+
+  // FONT originale del gioco: 768 byte gia' espansi in d.Pointer12926
+  // (ReadAndExpandGraphic(0x822d), CSBCode.cpp:1804). Layout: 6 righe x 128
+  // caratteri, byte[riga*128 + ascii] = 8 pixel orizzontali (BltOneChar,
+  // Graphics.cpp:199: A2 += 128 per riga). Decodifica: dmfont_decode.py.
+  if (d.Pointer12926 != NULL)
+  {
+    FILE *ff = fopen("invgfx/font.raw", "wb");
+    if (ff != NULL) { fwrite(d.Pointer12926, 1, 768, ff); fclose(ff); }
+  }
+
+  printf("[bridge] grafiche inventario: %d salvate -> invgfx/ (+ icondisplay/layout/font)\n",
+         saved);
+  fflush(stdout);
+  return saved;
+}
+
 // ---- etichette leggibili -------------------------------------------------
 
 static const char *RoomTypeName(int t)
@@ -550,7 +675,7 @@ static void DumpLevelMap(void)
 static void EmitPortraitsText(FILE *f)
 {
   int W = d.width, H = d.height;
-  int fxA[256], fyA[256], dirA[256], ordA[256];
+  int fxA[256], fyA[256], dirA[256], ordA[256], actA[256];
   int cnt = 0;
 
   for (int wy = 0; wy < H && cnt < 256; wy++)
@@ -582,12 +707,16 @@ static void EmitPortraitsText(FILE *f)
         if (ord > 23) continue;
 
         fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir; ordA[cnt] = ord;
+        // 5a riga: attivo/spento — il reclutamento disattiva l'attuatore
+        // (PORTRAIT_InActive) e nel 2D lo specchio resta sbiadito
+        actA[cnt] = ((p->State() & PORTRAIT_InActive) == 0) ? 1 : 0;
         cnt++;
       }
 
   fprintf(f, "%d\n", cnt);
   for (int i = 0; i < cnt; i++)
-    fprintf(f, "%d\n%d\n%d\n%d\n", fxA[i], fyA[i], dirA[i], ordA[i]);
+    fprintf(f, "%d\n%d\n%d\n%d\n%d\n",
+            fxA[i], fyA[i], dirA[i], ordA[i], actA[i]);
 }
 
 static void DumpPortraits(void)
@@ -875,6 +1004,20 @@ static void EmitStateText(FILE *ft)
     fprintf(ft, "%d\n%d\n%d\n", (int)mtA[i], (int)mxA[i], (int)myA[i]);
 
   EmitDoorsText(ft);   // porte del livello (stato di apertura + tipo)
+
+  // stato inventario/scheda campione (vedi ANALISI_SCHEDA_CAMPIONI.md):
+  //   PotentialCharacterOrdinal   != 0 -> campione provvisorio (menu resurrect)
+  //   SelectedCharacterOrdinal    != 0 -> inventario aperto per il campione N
+  //   DisplayResurrectChestOrScroll 5=menu resurrect 4=chest 2=pergamena 0=cibo
+  //   keyboardMode                  2 = name-entry di REINCARNATE in corso
+  // Appesi in FONDO cosi' il parse posizionale esistente dei client non cambia.
+  fprintf(ft, "%d\n%d\n%d\n%d\n",
+          (int)d.PotentialCharacterOrdinal,
+          (int)d.SelectedCharacterOrdinal,
+          (int)d.DisplayResurrectChestOrScroll,
+          (int)keyboardMode);
+
+  EmitChampsText(ft);   // barra campioni per l'HUD (4x17 + 6 + 5 righe, in coda)
 }
 
 static void DumpStateText(void)
@@ -933,15 +1076,477 @@ static void DumpWorldState(void)
 // TurnParty/MoveParty). Niente coordinate ne' contesto RESTARTABLE: il dispatch
 // normale del main loop applica il movimento col timing/cooldown corretti.
 //   1=gira sx  2=gira dx  3=avanti  4=strafe dx  5=indietro  6=strafe sx
+//   7..10 = toggle inventario campione 1..4 (ShowHideInventory; il motore
+//           stesso li ignora se c'e' un provvisorio pendente o slot vuoto)
 static void Bridge_InjectCommand(int code)
 {
-  if (code < 1 || code > 6) return;
+  if (code < 1 || code > 10) return;
   int q = d.MouseQEnd + 1;
   if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
   pMouseQueue[q].num = (ui16)code;
   pMouseQueue[q].x = 0;
   pMouseQueue[q].y = 0;
   d.MouseQEnd = (i16)q;
+}
+
+// ---- comando "MIRROR <ord>": aggiunta provvisoria del campione --------------
+// Chiama DAVVERO AddCharacter (funzione normale, lecita da Bridge_Tick — vedi
+// §1.5-bis di ANALISI_SCHEDA_CAMPIONI.md: NON e' una RESTARTABLE), esattamente
+// come il click sullo specchio nel 2D (Mouse.cpp:513, actuatorType 127).
+// AddCharacter controlla da solo mano vuota / party pieno / eroe morto; qui
+// le guardie che nel 2D sono garantite dal contesto e che lui NON controlla.
+static int Bridge_MirrorGuard(int ord)
+{
+  if (d.PotentialCharacterOrdinal != 0) return 0;  // provvisorio gia' pendente
+  if (d.SelectedCharacterOrdinal != 0) return 0;   // inventario aperto
+  if (keyboardMode == 2) return 0;                 // name-entry REINCARNATE
+  if (d.EmptyHanded == 0) return 0;                // oggetto in mano
+  if (d.NumCharacter >= 4) return 0;               // party pieno
+
+  // davanti al party deve esserci l'attuatore-ritratto ATTIVO con quel valore,
+  // con la faccia rivolta al party (pos+2 == facing, come il disable in
+  // _ResurrectReincarnateCancel): AddCharacter equipaggia dalla cella davanti.
+  int wx = d.partyX + (int)d.DeltaX[d.partyFacing];
+  int wy = d.partyY + (int)d.DeltaY[d.partyFacing];
+  if (wx < 0 || wx >= d.width || wy < 0 || wy >= d.height) return 0;
+  for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+  {
+    if (o.dbType() != dbACTUATOR) continue;
+    if (((o.pos() + 2) & 3) != (int)d.partyFacing) continue;
+    DBCOMMON *a = GetCommonAddress(o);
+    if (a == NULL) continue;
+    DB3 *p = a->CastToDB3();
+    if (p == NULL || p->actuatorType() != 127) continue;
+    if ((p->State() & PORTRAIT_InActive) != 0) continue;
+    if ((int)(p->value() & 511) != ord) continue;
+    return 1;
+  }
+  return 0;
+}
+
+// ---- comando "RRC <160|161|162>": bottoni RESURRECT/REINCARNATE/CANCEL ------
+// NON chiama _ResurrectReincarnateCancel (RESTARTABLE: una chiamata diretta
+// corromperebbe lo stateStack). Inietta invece il click gia' risolto nella coda
+// mouse col codice 81 (pannello inventario) e le coordinate del CENTRO del
+// bottone da Buttons18372: il dispatch normale ripercorre l'identico cammino
+// del 2D (_HandleMouseEvents -> _TAG01a6ea -> CALL1) con guardie e contesto
+// corretti. Stessa filosofia di Bridge_InjectCommand per il movimento.
+static int Bridge_InjectRRC(int code)
+{
+  if (code < 160 || code > 162) return 0;
+  if (d.PotentialCharacterOrdinal == 0) return 0;      // nessun provvisorio
+  if (d.DisplayResurrectChestOrScroll != 5) return 0;  // menu non a schermo
+  if (d.EmptyHanded == 0) return 0;                    // guardia di _TAG01a6ea
+  if (keyboardMode == 2) return 0;                     // name-entry in corso
+  for (int i = 0; i < 4; i++)
+  {
+    const btn *b = &d.Buttons18372[i];
+    if (b->word0 == 0) break;
+    if ((int)b->word0 != code) continue;
+    int q = d.MouseQEnd + 1;
+    if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+    pMouseQueue[q].num = 81;
+    pMouseQueue[q].x = (ui16)((b->xMin + b->xMax) / 2);
+    pMouseQueue[q].y = (ui16)((b->yMin + b->yMax) / 2);
+    d.MouseQEnd = (i16)q;
+    return 1;
+  }
+  return 0;
+}
+
+// ---- comando "GRAB <slot 0..29>": drag-and-drop inventario -------------------
+// Prende/posa l'oggetto nello slot come farebbe un click fisico sul backpack:
+// inietta un click SINISTRO alla coordinata dello slot via OnMouseClick, che
+// risolve da solo Buttons17760 (SecondaryButtonList dell'inventario aperto) e
+// produce il codice giusto -> HandleClothingClick fa lo swap objectInHand<->slot
+// con i controlli CarryLocation. Passando per la stessa via del mouse reale non
+// serve conoscere il codice ne' lo stato di HandChar. Coordinate: IconDisplay e'
+// relativa al viewport (0-based); il viewport e' a schermo (0, 33), icona 16x16
+// -> centro (+8,+8). Solo a campione CONFERMATO (niente drag sui provvisori).
+static int Bridge_InjectSlotClick(int slot)
+{
+  if (slot < 0 || slot > 29) return 0;
+  if (d.SelectedCharacterOrdinal == 0) return 0;   // inventario chiuso
+  if (d.PotentialCharacterOrdinal != 0) return 0;  // campione provvisorio
+  if (keyboardMode == 2) return 0;                 // name-entry REINCARNATE
+  if (d.PartySleeping) return 0;
+  int px = (int)d.IconDisplay[slot + 8].pixelX + 8;
+  int py = (int)d.IconDisplay[slot + 8].pixelY + 8 + 33;  // viewport a y=33
+  OnMouseClick(px, py, 2);   // 2 = tasto sinistro (btn.button)
+  return 1;
+}
+
+// ---- comando "SPELL <n>": barra magie (caster, rune, backspace, cast) -------
+// n = 0..3   -> seleziona il caster n: click sintetico {num:100, x:512+n, y:42}
+//               (HandleMagicClick accetta nativamente clickX 512..515 come
+//               selezione-caster senza coordinate reali, Magic.cpp:601-685).
+// n = 101..108 -> bottone della barra: 101-106 rune, 107 backspace, 108 cast.
+//               Click iniettato sul CENTRO del rect di Buttons18060, codice
+//               100: il dispatch 2D (_HandleMouseEvents -> _HandleMagicClick
+//               -> _MagicSelection) fa il resto con guardie e mana. Stessa
+//               filosofia di Bridge_InjectRRC.
+static int Bridge_InjectSpell(int n)
+{
+  if (d.PotentialCharacterOrdinal != 0) return 0;  // guardia del codice 100
+  if (d.MagicCaster < 0) return 0;                 // nessun caster selezionato
+  if (keyboardMode == 2) return 0;                 // name-entry in corso
+  int x = -1, y = -1;
+  if (n >= 0 && n <= 3)
+  {
+    if (n >= (int)d.NumCharacter) return 0;
+    x = 512 + n; y = 42;
+  }
+  else if (n >= 101 && n <= 108)
+  {
+    for (int i = 0; i < 9; i++)
+    {
+      const btn *b = &d.Buttons18060[i];
+      if (b->word0 == 0) break;
+      if ((int)b->word0 != n) continue;
+      x = (b->xMin + b->xMax) / 2;
+      y = (b->yMin + b->yMax) / 2;
+      break;
+    }
+    if (x < 0) return 0;
+  }
+  else return 0;
+  int q = d.MouseQEnd + 1;
+  if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+  pMouseQueue[q].num = 100;
+  pMouseQueue[q].x = (ui16)x;
+  pMouseQueue[q].y = (ui16)y;
+  d.MouseQEnd = (i16)q;
+  return 1;
+}
+
+// ---- risoluzione slot come la disegnerebbe il 2D ---------------------------
+// Replica DisplayBackpackItem (Character.cpp:1100): slot vuoto -> sagoma
+// segnaposto objNI_Special_*, chest/pergamena aperta in mano-arma -> +1,
+// cornice 33 (normale) / 34 (ouch) / 35 (mano che attacca). chOrd1 = chIdx+1.
+static void Bridge_ResolveSlot(CHARDESC *c, int chOrd1, int i,
+                               int *realNI, int *drawNI, int *frame)
+{
+  RN obj = c->Possession(i);
+  *realNI = -1; *frame = 0;
+  if (obj == RNnul)
+  {
+    if (i <= 5)
+    {
+      *drawNI = (int)objNI_Special_n + 2 * i;
+      if (c->ouches & (1 << i)) { (*drawNI)++; *frame = 34; }
+      else *frame = 33;
+    }
+    else if (i >= 10 && i <= 13) *drawNI = (int)objNI_Special_j + (i - 10);
+    else                         *drawNI = (int)objNI_Special_f;
+  }
+  else
+  {
+    *realNI = *drawNI = (int)obj.NameIndex();
+    if (i == 1 && (*drawNI == (int)objNI_Chest || *drawNI == (int)objNI_OpenScroll))
+      (*drawNI)++;
+    if (i <= 5) *frame = (c->ouches & (1 << i)) ? 34 : 33;
+  }
+  if (i == 1 && chOrd1 == (int)d.AttackingCharacterOrdinal) *frame = 35;
+}
+
+// ---- ordinale del ritratto dal NOME (per l'HUD) -----------------------------
+// Il CHARDESC non conserva QUALE cella dell'atlante 26 e' stata copiata
+// (AddCharacter copia solo i pixel): l'ordinale si ricava confrontando il
+// nome del campione con le schede dbTEXT dei 24 specchi (stessa scansione
+// del comando CHAMP), una volta per livello.
+static int  bridgePortLevel = -999;
+static int  bridgePortCount = 0;
+static char bridgePortName[24][8];
+static int  bridgePortOrd[24];
+
+static void BuildPortraitNameCache(void)
+{
+  bridgePortCount = 0;
+  int W = d.width, H = d.height;
+  for (int wy = 0; wy < H && bridgePortCount < 24; wy++)
+    for (int wx = 0; wx < W && bridgePortCount < 24; wx++)
+      for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbACTUATOR) continue;
+        DBCOMMON *a = GetCommonAddress(o);
+        if (a == NULL) continue;
+        DB3 *p = a->CastToDB3();
+        if (p == NULL || p->actuatorType() != 127) continue;
+
+        int s  = o.pos() & 3;
+        int fx = wx + (int)d.DeltaX[s], fy = wy + (int)d.DeltaY[s];
+        if (fx < 0 || fx >= W || fy < 0 || fy >= H) continue;
+        for (RN t = FindFirstObject(fx, fy); t != RNeof; t = GetDBRecordLink(t))
+        {
+          if (t.dbType() != dbTEXT) continue;
+          char text[1024]; text[0] = 0;
+          if (DecodeText(text, GetRecordAddressDB2(t), (i16)0x8002,
+                         (i32)sizeof(text) - 1) == -1) break;
+          int n = 0;
+          while (text[n] != 0 && text[n] != '\n' && n < 7)
+          { bridgePortName[bridgePortCount][n] = text[n]; n++; }
+          if (n == 0) break;
+          bridgePortName[bridgePortCount][n] = 0;
+          bridgePortOrd[bridgePortCount] = (int)(p->value() & 511);
+          bridgePortCount++;
+          break;
+        }
+      }
+  bridgePortLevel = (int)d.LoadedLevel;
+}
+
+static int PortraitOrdForName(const char *nm)
+{
+  if (bridgePortLevel != (int)d.LoadedLevel) BuildPortraitNameCache();
+  for (int i = 0; i < bridgePortCount; i++)
+    if (strncmp(bridgePortName[i], nm, 7) == 0) return bridgePortOrd[i];
+  return -1;
+}
+
+// ---- comando "SHEET": scheda completa del campione selezionato --------------
+// Serializza dal CHARDESC VIVO (il provvisorio creato da AddCharacter, o un
+// campione confermato con l'inventario aperto). Le 30 possession sono gia'
+// RISOLTE come le disegnerebbe il 2D (DisplayBackpackItem, Character.cpp:1100):
+// slot vuoti -> sagoma segnaposto objNI_Special_*, chest/pergamena aperta in
+// mano-arma -> variante +1, cornice 33/34/35. Righe (1 valore per riga):
+//   nome / titolo / hp / maxHp / stamina / maxStamina / mana / maxMana /
+//   load(dKg) / maxLoad(dKg) / food / water / poisonCount / ouches /
+//   PotentialCharacterOrdinal, poi 30 slot x 3 righe: realNI(-1=vuoto),
+//   drawNI (icona da disegnare), frame (0=nessuna, 33/34/35).
+static void EmitSheetText(FILE *f)
+{
+  int sel = (int)d.SelectedCharacterOrdinal;
+  if (sel < 1 || sel > 4) return;                  // guardato dal chiamante
+  CHARDESC *c = &d.CH16482[sel - 1];
+
+  // nome/titolo filtrati ad ASCII stampabile su una riga
+  char nm[20], ti[24];
+  int n = 0;
+  for (int i = 0; i < (int)sizeof(c->name) && c->name[i] != 0 && n < 19; i++)
+  { unsigned char ch = (unsigned char)c->name[i]; nm[n++] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?'; }
+  nm[n] = 0;
+  n = 0;
+  for (int i = 0; i < (int)sizeof(c->title) && c->title[i] != 0 && n < 23; i++)
+  { unsigned char ch = (unsigned char)c->title[i]; ti[n++] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?'; }
+  ti[n] = 0;
+
+  fprintf(f, "%s\n%s\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n",
+          nm, ti,
+          (int)c->HP(), (int)c->MaxHP(),
+          (int)c->Stamina(), (int)c->MaxStamina(),
+          (int)c->Mana(), (int)c->MaxMana(),
+          (int)c->load, (int)MaxLoad(c),
+          (int)c->food, (int)c->water,
+          (int)c->poisonCount, (int)c->ouches,
+          (int)d.PotentialCharacterOrdinal);
+
+  for (int i = 0; i < 30; i++)
+  {
+    int realNI, drawNI, frame;
+    Bridge_ResolveSlot(c, sel, i, &realNI, &drawNI, &frame);
+    fprintf(f, "%d\n%d\n%d\n", realNI, drawNI, frame);
+  }
+
+  // pannello dell'occhio (PressingEye -> TAG019036, Character.cpp:4602):
+  // 4 righe titolo-mastery ("NOVICE FIGHTER", "-" se la classe non ha
+  // livello) + 6 attributi (STRENGTH..ANTI-FIRE, indici 1..6; lo 0 e'
+  // LUCK, nascosto anche nel 2D) come coppie cur/max. In coda: il parse
+  // posizionale esistente dei client non cambia.
+  for (int cl = 0; cl < 4; cl++)
+  {
+    int m = (int)DetermineMastery(sel - 1, cl | 0x8000);
+    if (m > 16) m = 16;
+    if (m <= 1) { fprintf(f, "-\n"); continue; }
+    fprintf(f, "%s %s\n",
+            TranslateLanguage((char *)d.Pointer16770[m]),
+            TranslateLanguage(d.Pointer16596[cl]));
+  }
+  for (int i = 1; i <= 6; i++)
+    fprintf(f, "%d\n%d\n", (int)c->Attributes[i].Current(),
+                           (int)c->Attributes[i].Maximum());
+}
+
+// ---- sezione CHAMPS del push (HUD: barra campioni) --------------------------
+// 4 slot FISSI da 17 righe (parse posizionale semplice; slot inattivo = zeri):
+//   active / nome / portraitOrd / hp / maxHp / stamina / maxStamina / mana /
+//   maxMana / charPosition / facing / colore(Byte1386) / shieldStrength /
+//   mano0 drawNI / mano0 frame / mano1 drawNI / mano1 frame
+// + 6 righe globali: FireShield / SpellShield / PartyShield / MagicCaster /
+//   HandChar / objectInHand NI. Vedi ANALISI_HUD_3D.md §3.
+// + 5 righe stato spell del caster (barra magie, HUD-4): byte33 (stadio
+//   0..3 = n. rune gia' scelte; -1 se nessun caster) e incantation[0..3]
+//   (codici glifo del font DM 96..119, 0 = vuoto).
+static void EmitChampsText(FILE *ft)
+{
+  for (int i = 0; i < 4; i++)
+  {
+    CHARDESC *c = &d.CH16482[i];
+    bool active = (i < (int)d.NumCharacter) && c->MaxHP() > 0;
+    if (!active)
+    {
+      fprintf(ft, "0\n-\n-1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n-1\n0\n-1\n0\n");
+      continue;
+    }
+    char nm[8];
+    int n = 0;
+    for (int k = 0; k < (int)sizeof(c->name) && c->name[k] != 0 && n < 7; k++)
+    { unsigned char ch = (unsigned char)c->name[k];
+      nm[n++] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?'; }
+    nm[n] = 0;
+
+    int h0r, h0d, h0f, h1r, h1d, h1f;
+    Bridge_ResolveSlot(c, i + 1, 0, &h0r, &h0d, &h0f);
+    Bridge_ResolveSlot(c, i + 1, 1, &h1r, &h1d, &h1f);
+
+    fprintf(ft, "1\n%s\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n",
+            nm, PortraitOrdForName(nm),
+            (int)c->HP(), (int)c->MaxHP(),
+            (int)c->Stamina(), (int)c->MaxStamina(),
+            (int)c->Mana(), (int)c->MaxMana(),
+            (int)c->charPosition, (int)c->facing, (int)d.Byte1386[i],
+            (int)c->shieldStrength,
+            h0d, h0f, h1d, h1f);
+  }
+  fprintf(ft, "%d\n%d\n%d\n%d\n%d\n%d\n",
+          (int)d.FireShield, (int)d.SpellShield, (int)d.PartyShield,
+          (int)d.MagicCaster, (int)d.HandChar,
+          (d.objectInHand == RNnul) ? -1 : (int)d.objectInHand.NameIndex());
+  int mc = (int)d.MagicCaster;
+  if (mc >= 0 && mc < 4)
+  {
+    CHARDESC *cc = &d.CH16482[mc];
+    fprintf(ft, "%d\n", (int)(UI8)cc->byte33);
+    for (int k = 0; k < 4; k++)
+      fprintf(ft, "%d\n", (int)(UI8)cc->incantation[k]);
+  }
+  else
+    fprintf(ft, "-1\n0\n0\n0\n0\n");
+}
+
+// ---- anteprima campione (per il comando TCP "CHAMP <ord>") ----------------
+// Replica IN SOLA LETTURA il parse di AddCharacter (Character.cpp:457): lo
+// specchio e' l'attuatore murale type 127 con value==ord (0..23); la sua
+// scheda e' un record dbTEXT "invisibile" (show=0, per questo non appare tra
+// le targhe) sulla cella calpestabile DAVANTI allo specchio, decodificato con
+// DecodeText modo 0x8002. Formato scheda:
+//   NOME \n TITOLO \n \n M|F \n hp(4)stam(4)mana(4) \n 7 attributi (2 cifre)
+//   \n 16 skill ('A'+livello) ...
+// dove le "cifre" sono esadecimali con lettere 'A'..'P' (A=0 .. P=15), lo
+// stesso schema di DecodeCharacterValue. Qui nessuno stato di gioco e' toccato.
+
+static int ChampValue(const char **p, int num)
+{
+  int result = 0;
+  while (num-- > 0)
+  {
+    char ch = **p;
+    if (ch < 'A' || ch > 'P') return -1;
+    result = (result << 4) + (ch - 'A');
+    (*p)++;
+  }
+  return result;
+}
+
+// Emette su f le righe della scheda: nome / titolo / sesso / hp / stamina /
+// mana / 7 attributi (Fortuna,Forza,Destrezza,Saggezza,Vitalita',AntiMagia,
+// AntiFuoco) / 16 skill (livello 0..17). Ritorna 1 se la scheda e' valida.
+static int Bridge_EmitChampFields(FILE *f, const char *t)
+{
+  char name[8], title[20];
+  const char *p = t;
+
+  int n = 0;
+  while (*p != '\0' && *p != '\n')
+  {
+    if (n >= 7) return 0;
+    name[n++] = *p++;
+  }
+  if (*p != '\n' || n == 0) return 0;
+  name[n] = 0;
+  p++;
+
+  // titolo: termina alla PRIMA coppia di '\n' (stessa logica di AddCharacter)
+  n = 0;
+  int seenNL = 0;
+  for (;;)
+  {
+    char ch = *p++;
+    if (ch == '\0') return 0;
+    if (ch == '\n') { if (seenNL) break; seenNL = 1; continue; }
+    if (n >= 19) return 0;
+    title[n++] = ch;
+  }
+  title[n] = 0;
+
+  char sex = *p++;
+  if (sex != 'M' && sex != 'F') return 0;
+  if (*p++ != '\n') return 0;
+
+  int hp = ChampValue(&p, 4);
+  int st = ChampValue(&p, 4);
+  int ma = ChampValue(&p, 4);
+  if (hp < 0 || st < 0 || ma < 0) return 0;
+  if (*p++ != '\n') return 0;
+
+  int attr[7];
+  for (int i = 0; i < 7; i++)
+  {
+    attr[i] = ChampValue(&p, 2);
+    if (attr[i] < 0) return 0;
+    if (attr[i] > 224) attr[i] = 224;        // stesso cap di AddCharacter
+  }
+  if (*p++ != '\n') return 0;
+
+  int skill[16];
+  for (int i = 0; i < 16; i++)
+  {
+    char ch = *p++;
+    if (ch == '\0') return 0;
+    int v = ch - 'A';
+    if (v < 0 || v > 17) v = 0;
+    skill[i] = v;
+  }
+
+  fprintf(f, "%s\n%s\n%c\n%d\n%d\n%d\n", name, title, sex, hp, st, ma);
+  for (int i = 0; i < 7; i++)  fprintf(f, "%d\n", attr[i]);
+  for (int i = 0; i < 16; i++) fprintf(f, "%d\n", skill[i]);
+  return 1;
+}
+
+// Trova specchio + scheda del campione `ord` ed emette su f. 1 = trovata.
+static int Bridge_EmitChamp(FILE *f, int ord)
+{
+  int W = d.width, H = d.height;
+  for (int wy = 0; wy < H; wy++)
+    for (int wx = 0; wx < W; wx++)
+      for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbACTUATOR) continue;
+        DBCOMMON *a = GetCommonAddress(o);
+        if (a == NULL) continue;
+        DB3 *p = a->CastToDB3();
+        if (p == NULL || p->actuatorType() != 127) continue;
+        if ((int)(p->value() & 511) != ord) continue;
+
+        int s  = o.pos() & 3;
+        int fx = wx + (int)d.DeltaX[s];
+        int fy = wy + (int)d.DeltaY[s];
+        if (fx < 0 || fx >= W || fy < 0 || fy >= H) return 0;
+
+        // scheda = primo dbTEXT sulla cella davanti (come AddCharacter, che
+        // la cerca sulla cella del party quando si clicca lo specchio)
+        for (RN t = FindFirstObject(fx, fy); t != RNeof; t = GetDBRecordLink(t))
+        {
+          if (t.dbType() != dbTEXT) continue;
+          char text[1024];
+          text[0] = 0;
+          if (DecodeText(text, GetRecordAddressDB2(t), (i16)0x8002,
+                         (i32)sizeof(text) - 1) == -1) return 0;
+          return Bridge_EmitChampFields(f, text);
+        }
+        return 0;
+      }
+  return 0;
 }
 
 // ===========================================================================
@@ -960,6 +1565,8 @@ static void Bridge_InjectCommand(int code)
 //   TEXTS       ->  "OK <n>" + n righe (formato dm_texts_<N>.txt)
 //   PLATES      ->  "OK <n>" + n righe (formato dm_plates_<N>.txt)
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
+//   CHAMP <ord> ->  "OK 29" + scheda campione: nome/titolo/sesso/hp/stamina/
+//                   mana/7 attributi/16 skill ("ERR nochamp" se non esiste)
 //   CMD <1..6>  ->  "OK 0"   (inietta il movimento nella coda mouse)
 //   SUB         ->  "OK 0"; da qui in poi il server invia spontaneamente
 //                   "PUSH <n>" + n righe (formato STATE) a ogni cambiamento
@@ -1077,6 +1684,28 @@ static void BridgeSrv_QueueFramed(BridgeClient *c, const char *hdr, void (*emit)
   free(buf);
 }
 
+// Risposta al comando CHAMP <ord>: come QueueFramed ma con esito — se la
+// scheda non esiste non si accoda nulla e si ritorna 0 (il chiamante fa ERR).
+static int BridgeSrv_QueueChamp(BridgeClient *c, int ord)
+{
+  char  *buf = NULL;
+  size_t len = 0;
+  FILE  *m = open_memstream(&buf, &len);
+  if (m == NULL) return 0;
+  int ok = Bridge_EmitChamp(m, ord);
+  fclose(m);
+  if (!ok || len == 0) { free(buf); return 0; }
+
+  int lines = 0;
+  for (size_t i = 0; i < len; i++) if (buf[i] == '\n') lines++;
+  char h[32];
+  int hl = snprintf(h, sizeof(h), "OK %d\n", lines);
+  BridgeSrv_Queue(c, h, (size_t)hl);
+  BridgeSrv_Queue(c, buf, len);
+  free(buf);
+  return 1;
+}
+
 static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
 {
   while (*line == ' ') line++;                       // trim sinistro
@@ -1110,16 +1739,86 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitPortraitsText);
   }
+  else if (strcmp(line, "PORTS") == 0)
+  {
+    // come PORTRAITS ma con header "PORTS <n>": il client la riconosce anche
+    // in mezzo ai PUSH (refresh asincrono dei ritratti sbiaditi dopo un
+    // reclutamento, stesso schema di SHEET)
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "PORTS", EmitPortraitsText);
+  }
+  else if (strncmp(line, "CHAMP ", 6) == 0)
+  {
+    int ord = atoi(line + 6);
+    if (!bridgeLevelReady || ord < 0 || ord > 23)
+      BridgeSrv_Queue(c, "ERR badchamp\n", 13);
+    else if (!BridgeSrv_QueueChamp(c, ord))
+      BridgeSrv_Queue(c, "ERR nochamp\n", 12);
+  }
   else if (strncmp(line, "CMD ", 4) == 0)
   {
     int code = atoi(line + 4);
-    if (!bridgeLevelReady || code < 1 || code > 6)
+    if (!bridgeLevelReady || code < 1 || code > 10)
       BridgeSrv_Queue(c, "ERR badcmd\n", 11);
     else
     {
       Bridge_InjectCommand(code);
       BridgeSrv_Queue(c, "OK 0\n", 5);
     }
+  }
+  else if (strncmp(line, "MIRROR ", 7) == 0)
+  {
+    // click sullo specchio dal 3D: aggiunta PROVVISORIA del campione al party
+    // (il 2D passa alla schermata inventario; il 3D la apre dal push).
+    int ord = atoi(line + 7);
+    if (!bridgeLevelReady || ord < 0 || ord > 23)
+      BridgeSrv_Queue(c, "ERR badmirror\n", 14);
+    else if (!Bridge_MirrorGuard(ord))
+      BridgeSrv_Queue(c, "ERR nomirror\n", 13);
+    else
+    {
+      AddCharacter((i16)ord);
+      // AddCharacter e' void: successo = il provvisorio esiste davvero
+      if (d.PotentialCharacterOrdinal != 0) BridgeSrv_Queue(c, "OK 0\n", 5);
+      else BridgeSrv_Queue(c, "ERR refused\n", 12);
+    }
+  }
+  else if (strcmp(line, "SHEET") == 0)
+  {
+    // scheda completa del campione con l'inventario aperto (header "SHEET <n>"
+    // e non "OK <n>": cosi' il client la riconosce anche in mezzo ai PUSH)
+    if (!bridgeLevelReady || d.SelectedCharacterOrdinal < 1 ||
+        d.SelectedCharacterOrdinal > 4)
+      BridgeSrv_Queue(c, "ERR nosheet\n", 12);
+    else
+      BridgeSrv_QueueFramed(c, "SHEET", EmitSheetText);
+  }
+  else if (strncmp(line, "RRC ", 4) == 0)
+  {
+    // bottoni RESURRECT(160)/REINCARNATE(161)/CANCEL(162): click iniettato
+    int code = atoi(line + 4);
+    if (!bridgeLevelReady || !Bridge_InjectRRC(code))
+      BridgeSrv_Queue(c, "ERR badrrc\n", 11);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "GRAB ", 5) == 0)
+  {
+    // drag-and-drop inventario: prendi/posa l'oggetto nello slot (0..29)
+    int slot = atoi(line + 5);
+    if (!bridgeLevelReady || !Bridge_InjectSlotClick(slot))
+      BridgeSrv_Queue(c, "ERR badgrab\n", 12);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "SPELL ", 6) == 0)
+  {
+    // barra magie: 0-3 seleziona caster, 101-106 rune, 107 bksp, 108 cast
+    int n = atoi(line + 6);
+    if (!bridgeLevelReady || !Bridge_InjectSpell(n))
+      BridgeSrv_Queue(c, "ERR badspell\n", 13);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
   }
   else if (strcmp(line, "SUB") == 0)
   {
@@ -1253,7 +1952,7 @@ static bool BridgeSrv_HasSubscribers(void) { return false; }
 #endif
 
 // ---- hook dal game loop --------------------------------------------------
-void Bridge_Tick(void)
+static void Bridge_TickBody(void)
 {
   // Il server TCP gira SEMPRE (anche al titolo/menu: risponde "ERR nolevel"
   // finche' un livello reale non e' caricato). Il resto del ponte richiede
@@ -1276,6 +1975,10 @@ void Bridge_Tick(void)
   // pulsanti di movimento (grafica 13): esporta una volta come BMP per dm3d
   static bool mvBtnDone = false;
   if (!mvBtnDone && Bridge_ExportMoveButtons() > 0) mvBtnDone = true;
+
+  // grafiche della schermata inventario/scheda campione: esporta una volta
+  static bool invGfxDone = false;
+  if (!invGfxDone && Bridge_ExportInvGfx() > 0) invGfxDone = true;
 
   // pressure plate: (ri)esporta quando il livello caricato cambia. Robusto anche
   // se il dump-mappa (legato al cambio livello) non scatta su auto-resume.
@@ -1305,10 +2008,78 @@ void Bridge_Tick(void)
   // mostri vicini restano aggiornati anche se il party sta fermo).
   bool moved = (d.partyX != prevX || d.partyY != prevY || d.partyFacing != prevFacing);
   bool periodic = ((int)d.Time - lastDumpTime >= 6);
-  if (levelChanged || moved || periodic)
+
+  // ...e SUBITO quando cambia lo stato inventario/scheda (apertura/chiusura,
+  // menu resurrect, name-entry): il pannello 3D deve reagire senza aspettare
+  // il push periodico.
+  static int prevPot = -1, prevSel = -1, prevDRC = -1, prevKbd = -1;
+  static int prevHand = -12345;
+  // objectInHand: cambia a ogni presa/posa del drag-and-drop; senza questo il
+  // cursore-oggetto del 3D si aggiornerebbe solo col push periodico (~1s).
+  int curHand = (d.objectInHand == RNnul) ? -1 : (int)d.objectInHand.ConvertToInteger();
+  bool invChanged = ((int)d.PotentialCharacterOrdinal    != prevPot ||
+                     (int)d.SelectedCharacterOrdinal     != prevSel ||
+                     (int)d.DisplayResurrectChestOrScroll != prevDRC ||
+                     (int)keyboardMode                    != prevKbd ||
+                     curHand                              != prevHand);
+  if (invChanged)
+  {
+    prevPot = (int)d.PotentialCharacterOrdinal;
+    prevSel = (int)d.SelectedCharacterOrdinal;
+    prevDRC = (int)d.DisplayResurrectChestOrScroll;
+    prevKbd = (int)keyboardMode;
+    prevHand = curHand;
+  }
+
+  // ...e SUBITO quando cambia lo stato della barra magie (caster selezionato,
+  // runa aggiunta/tolta): senza questo la runa cliccata nel 3D comparirebbe
+  // solo col push periodico (~1s dopo).
+  static int prevCaster = -2, prevStage = -2;
+  static int prevInc[4] = { -1, -1, -1, -1 };
+  int curCaster = (int)d.MagicCaster;
+  int curStage = -1, curInc[4] = { 0, 0, 0, 0 };
+  if (curCaster >= 0 && curCaster < 4)
+  {
+    CHARDESC *sc = &d.CH16482[curCaster];
+    curStage = (int)(UI8)sc->byte33;
+    for (int k = 0; k < 4; k++) curInc[k] = (int)(UI8)sc->incantation[k];
+  }
+  bool spellChanged = (curCaster != prevCaster || curStage != prevStage ||
+                       curInc[0] != prevInc[0] || curInc[1] != prevInc[1] ||
+                       curInc[2] != prevInc[2] || curInc[3] != prevInc[3]);
+  if (spellChanged)
+  {
+    prevCaster = curCaster; prevStage = curStage;
+    for (int k = 0; k < 4; k++) prevInc[k] = curInc[k];
+  }
+
+  if (levelChanged || moved || periodic || invChanged || spellChanged)
   {
     prevX = d.partyX; prevY = d.partyY; prevFacing = d.partyFacing;
     lastDumpTime = (int)d.Time;
     DumpWorldState();
+  }
+}
+
+// Il tick del ponte gira FUORI dal try/catch di CSBUI: se un accessorio del
+// motore raggiunto da qui chiamasse UI_Die (che fa `throw` di un int),
+// l'eccezione risalirebbe non catturata fino a std::terminate (SIGABRT).
+// Il ponte e' un lettore accessorio e non deve MAI abbattere il gioco:
+// qualsiasi eccezione viene assorbita qui (avviso una sola volta).
+void Bridge_Tick(void)
+{
+  try
+  {
+    Bridge_TickBody();
+  }
+  catch (...)
+  {
+    static bool warned = false;
+    if (!warned)
+    {
+      warned = true;
+      printf("[bridge] eccezione dal motore assorbita nel tick del ponte\n");
+      fflush(stdout);
+    }
   }
 }

@@ -933,6 +933,7 @@ static void EmitChampions(FILE *f)
 static int   bridgeDoorLevel = -999;   // livello a cui si riferisce la cache
 static int   bridgeDoorCount = 0;
 static short bridgeDoorX[512], bridgeDoorY[512], bridgeDoorType[512];
+static short bridgeDoorOrn[512];       // ornateness() 0..15 (decoro per-porta: grata, ecc.)
 
 static void BuildDoorCache(void)
 {
@@ -942,19 +943,34 @@ static void BuildDoorCache(void)
     for (int x = 0; x < W && bridgeDoorCount < 512; x++)
     {
       if (((GetCellFlags(x, y) >> 5) & 7) != roomDOOR) continue;
-      int type = 0;
+      int type = 0, orn = 0;
       RN dn = FindFirstDoor(x, y);
       if (dn != RNeof)
       {
         DB0 *door = GetRecordAddressDB0(dn);
-        if (door != NULL) type = door->doorType();
+        if (door != NULL) { type = door->doorType(); orn = door->ornateness(); }
       }
       bridgeDoorX[bridgeDoorCount]    = (short)x;
       bridgeDoorY[bridgeDoorCount]    = (short)y;
       bridgeDoorType[bridgeDoorCount] = (short)type;
+      bridgeDoorOrn[bridgeDoorCount]  = (short)orn;
       bridgeDoorCount++;
     }
   bridgeDoorLevel = (int)d.LoadedLevel;
+}
+
+// DOORORN: statico per livello, un blocco (x, y, ornateness) per porta. Serve al
+// viewer 3D per distinguere porte dello STESSO doorType ma decoro diverso (es.
+// una liscia/piena e una a grata): l'aspetto reale in DM = base(doorType) +
+// overlay(ornateness) (CSBCode.cpp:DrawDoor/TAG004b26). Lo STATE caldo resta a
+// 4 campi (x,y,state,type); qui l'informazione statica in piu', letta una volta.
+static void EmitDoorOrnText(FILE *ft)
+{
+  if (bridgeDoorLevel != (int)d.LoadedLevel) BuildDoorCache();
+  fprintf(ft, "%d\n", bridgeDoorCount);
+  for (int i = 0; i < bridgeDoorCount; i++)
+    fprintf(ft, "%d\n%d\n%d\n",
+            (int)bridgeDoorX[i], (int)bridgeDoorY[i], (int)bridgeDoorOrn[i]);
 }
 
 static void EmitDoorsText(FILE *ft)
@@ -1733,6 +1749,11 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitPlatesText);
+  }
+  else if (strcmp(line, "DOORORN") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitDoorOrnText);
   }
   else if (strcmp(line, "PORTRAITS") == 0)
   {

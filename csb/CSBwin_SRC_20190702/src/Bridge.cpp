@@ -994,6 +994,49 @@ static void EmitDecorText(FILE *f)
     fprintf(f, "%d\n%d\n%d\n%d\n", xA[i], yA[i], ordA[i], gnA[i]);
 }
 
+// ---- pedane (attuatori con grafica di pavimento) -------------------------
+// La "pedana" (pressure pad/dais visibile) e' un ATTUATORE su cella di pavimento
+// con wallGraphicOrdinal()>0: DM la disegna come floor-decoration esplicita
+// (Codea59a.cpp:340, ramo attuatore -> decorations[2]). Nel 3D NON usiamo quella
+// grafica: il viewer ci disegna sopra una lastra quadrata sottile texturizzata
+// come il pavimento. Qui riportiamo solo DOVE stanno: scandiamo l'intero livello
+// e, per ogni cella di pavimento aperto con un attuatore wallGraphicOrdinal in
+// [1..NumFloorDecorations], emettiamo x, y, ordinale. Formato:
+//   count, poi 3 righe/pedana: x / y / ordinale
+static void EmitPedaneText(FILE *f)
+{
+  int nFloor = (d.pCurLevelDesc != NULL)
+                 ? (int)d.pCurLevelDesc->NumFloorDecorations() : 0;
+  int xA[512], yA[512], ordA[512];
+  int cnt = 0;
+
+  for (int y = 0; y < d.height && cnt < 512; y++)
+    for (int x = 0; x < d.width && cnt < 512; x++)
+    {
+      int cf = (int)GetCellFlags(x, y);
+      if (((cf >> 5) & 7) != roomOPEN) continue;      // pedane su pavimento aperto
+      for (RN o = FindFirstObject(x, y); o != RNeof; o = GetDBRecordLink(o))
+      {
+        if (o.dbType() != dbACTUATOR) continue;
+        DBCOMMON *a = GetCommonAddress(o);
+        if (a == NULL) continue;
+        DB3 *p = a->CastToDB3();
+        if (p == NULL) continue;
+        int wgo = (int)p->wallGraphicOrdinal();
+        if (wgo > 0 && wgo <= nFloor)
+        {
+          xA[cnt] = x; yA[cnt] = y; ordA[cnt] = wgo;
+          cnt++;
+          break;                                       // una pedana per cella
+        }
+      }
+    }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n", xA[i], yA[i], ordA[i]);
+}
+
 // Indici degli attributi in CHARDESC::Attributes[7] (vedi CSB.h:2564).
 // 0=Luck, 1=Strength, 2=Dexterity, 3=Wisdom, 4=Vitality, 5=AntiMagic, 6=AntiFire.
 static void EmitChampion(FILE *f, CHARDESC *c, int idx, bool active, bool *first)
@@ -1708,6 +1751,8 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //                   x/y/pos/dbType/objNI/nome)
 //   DECOR       ->  "OK <n>" + decorazioni di pavimento vicine (4 righe/cella:
 //                   x/y/ordinale/graphicNumber)
+//   PEDANE      ->  "OK <n>" + pedane (attuatori con grafica di pavimento):
+//                   3 righe/pedana: x/y/ordinale
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
 //   CHAMP <ord> ->  "OK 29" + scheda campione: nome/titolo/sesso/hp/stamina/
 //                   mana/7 attributi/16 skill ("ERR nochamp" se non esiste)
@@ -1897,6 +1942,11 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else { Bridge_ExportDecorGfx(); BridgeSrv_Queue(c, "OK 0\n", 5); }
+  }
+  else if (strcmp(line, "PEDANE") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitPedaneText);
   }
   else if (strcmp(line, "PORTRAITS") == 0)
   {

@@ -455,6 +455,48 @@ If BridgeReq("DECOR") >= 1 Then
 	Next
 EndIf
 
+; ------------------------------------------------------------- pedane a pavimento
+; La "pedana" (pressure pad/dais) e' un attuatore con grafica di pavimento: nel 2D
+; e' una floor-decoration, ma nel 3D la rendiamo come una LASTRA quadrata SOTTILE,
+; texturizzata come il pavimento e appena rialzata. Celle dal bridge (PEDANE);
+; centrata sul tile; lato 75% del tile (25% piu' piccola del quadrato del party).
+Const PED_HW# = CELL*0.30    ; mezzo-lato: 60% del tile
+Const PED_BH# = 0.035        ; mezzo-spessore del CORPO (bordo nero) - sporgenza contenuta
+Const PED_TH# = 0.008        ; mezzo-spessore della LASTRA superiore
+Const PED_TOPCOL = 200       ; luminosita' lastra superiore full-bright (255=piena)
+If BridgeReq("PEDANE") >= 1 Then
+	pncount = Int(brLine$(0))
+	pk = 1
+	For i = 1 To pncount
+		pxc = Int(brLine$(pk))
+		pyc = Int(brLine$(pk+1))
+		pk = pk + 3                                    ; salta l'ordinale (riga pk+2)
+		If pxc >= 0 And pxc < W And pyc >= 0 And pyc < H Then
+			cxw# = (W-1-pxc)*CELL                       ; centro cella (riflesso su X)
+			czw# = pyc*CELL
+			; CORPO: pareti laterali grigio molto scuro, niente texture. Il suo top
+			; (a 0.1+2*PED_BH) viene coperto dalla lastra, quindi si vedono solo i lati.
+			pbody = CreateCube()
+			ScaleEntity pbody, PED_HW, PED_BH, PED_HW
+			PositionEntity pbody, cxw, 0.1 + PED_BH, czw   ; base appoggiata sul pavimento
+			EntityColor pbody, 0, 0, 0                     ; bordo nero
+			; LASTRA superiore: texture del pavimento, full-bright cosi' resta piu'
+			; chiara del pavimento attenuato dalla torcia (~15% piu' chiara). La
+			; luminosita' si regola con PED_TOPCOL (255 = piena; abbassa per meno).
+			ptop = CreateCube()
+			ScaleEntity ptop, PED_HW, PED_TH, PED_HW
+			PositionEntity ptop, cxw, 0.1 + 2.0*PED_BH + PED_TH + 0.001, czw
+			EntityColor ptop, PED_TOPCOL, PED_TOPCOL, PED_TOPCOL
+			If floortex <> 0 Then
+				EntityTexture ptop, floortex, 0, 0
+			Else
+				EntityColor ptop, PED_TOPCOL, PED_TOPCOL, PED_TOPCOL
+			EndIf
+			EntityFX ptop, 1                            ; full-bright: sopra piu' chiaro
+		EndIf
+	Next
+EndIf
+
 ; ---------------------------------------------------- ritratti dei campioni
 ; Texture dei 24 campioni (immagini rifatte: portraits/00.png .. 23.png).
 ; ScaleTexture .,1,-1 corregge il flip verticale (origine immagine top-left

@@ -27,7 +27,7 @@ Dim portEnt(NPORT-1)       ; entity del quadro sul muro (0 = non piazzato)
 Dim portSeen(NPORT-1)      ; visto nell'ultimo PORTS (0 = sparito -> reclutato/HidePortrait)
 Global partySize = -1      ; n. slot attivi visto nell'ultimo push (per PORTS)
 Global prevPcPot = 0       ; pcPot del push precedente (conferma/cancel -> PORTS)
-Const PORT_W# = CELL*0.55  ; larghezza/altezza del quadro appeso al muro
+Const PORT_W# = CELL*0.4125 ; larghezza/altezza del quadro appeso al muro (-25%)
 Const PORT_T# = 0.10       ; spessore della tavola (sottile)
 Const PORT_USED_ALPHA# = 0.08  ; specchio usato: volto quasi svanito (0=cornice vuota)
 
@@ -230,7 +230,7 @@ CameraFogRange camera, CELL*0.5, CELL*3.0
 ; dungeon e' buio, solo la torcia illumina (il rilievo dei muri vive di questa luce).
 light = CreateLight(2)                 ; 2 = point light
 LightColor light, 255, 190, 120        ; calda ma piu' luminosa (piu' lumen su G/B)
-LightRange light, CELL*5.2             ; raggio ~2x: torcia piu' intensa (att = (1-d/range)^2)
+LightRange light, CELL*5.72            ; raggio ~2x +10%: torcia piu' intensa (att = (1-d/range)^2)
 AmbientLight 16, 16, 16                ; quasi buio: base minima per non avere nero pieno
 ; la torcia e' tenuta in mano IN ALTO A DESTRA: figlia della camera con offset
 ; locale (X destra, Y su, Z avanti). Luce di taglio -> il rilievo dei muri/pavimento
@@ -412,6 +412,48 @@ For y = -1 To H
 		EndIf
 	Next
 Next
+
+; ------------------------------------------------ decorazioni di pavimento
+; Il "ciuffo d'erba" (& simili): decorazioni PROCEDURALI del motore DM. NON sono
+; oggetti a terra e NON stanno nella mappa: il 2D le calcola con un hash
+; deterministico di (x,y,livello,dimensioni). Il bridge (comando DECOR) usa la
+; STESSA funzione del motore e ci manda, per OGNI cella del livello: x, y,
+; ordinale, graphicNumber. Le grafiche sono estratte offline in decorgfx/g<N>.png
+; (comando DECORGFX del bridge + gfx_decode.py). Qui piazziamo un decal piatto,
+; texturizzato con alpha, appena sopra il pavimento (top a Y=0.1).
+Dim decoTex(1023)                 ; cache texture per numero-grafica (0 = non caricata)
+If BridgeReq("DECOR") >= 1 Then
+	dcount = Int(brLine$(0))
+	dk = 1
+	For i = 1 To dcount
+		dx  = Int(brLine$(dk))
+		dy  = Int(brLine$(dk+1))
+		dgn = Int(brLine$(dk+3))               ; brLine$(dk+2) = ordinale (non serve qui)
+		dk = dk + 4
+		If dx >= 0 And dx < W And dy >= 0 And dy < H And dgn > 0 And dgn < 1024 Then
+			If decoTex(dgn) = 0 Then
+				; asset EDITABILE: se esiste decorgfx/g<N>_custom.png usiamo quello
+				; (versione ridipinta a mano, mai sovrascritta dalla pipeline di
+				; estrazione), altrimenti ripieghiamo sulla PNG auto-estratta.
+				cust$ = "decorgfx/g" + dgn + "_custom.png"
+				If FileType(cust$) = 1 Then
+					decoTex(dgn) = LoadTexture(cust$, 2)                    ; flag 2 = alpha
+				Else
+					decoTex(dgn) = LoadTexture("decorgfx/g" + dgn + ".png", 2)
+				EndIf
+			EndIf
+			If decoTex(dgn) <> 0 Then
+				cxw# = (W-1-dx)*CELL           ; stessa proiezione riflessa su X della camera
+				czw# = dy*CELL
+				deco = CreateCube()
+				ScaleEntity deco, CELL*0.364, 0.02, CELL*0.364  ; decal piatto (~mezzo tile, +30%)
+				PositionEntity deco, cxw, 0.13, czw            ; appena sopra il pavimento
+				EntityColor deco, 255, 255, 255
+				EntityTexture deco, decoTex(dgn)
+			EndIf
+		EndIf
+	Next
+EndIf
 
 ; ---------------------------------------------------- ritratti dei campioni
 ; Texture dei 24 campioni (immagini rifatte: portraits/00.png .. 23.png).
@@ -764,7 +806,7 @@ While Not KeyHit(1)
 	; arretra la camera DIETRO lo sguardo, nel suo spazio LOCALE: cosi' l'offset di
 	; arretramento RUOTA sempre insieme alla vista (MoveEntity = relativo all'orienta-
 	; mento della camera, non al mondo). Verso il bordo posteriore della cella.
-	MoveEntity camera, 0, 0, -CELL * 0.45
+	MoveEntity camera, 0, 0, -CELL * 0.20
 
 	; door-cam di debug: ignora il party e inquadra la prima porta del livello
 	If DOORCAM And firstDoorPiv <> 0 Then
@@ -795,7 +837,7 @@ While Not KeyHit(1)
 	; luminosa e piu' gialla), poi torna. Niente sbalzi forti.
 	fvar# = torchFlare * 0.04                   ; 0..0.04 -> tetto +4%
 	LightColor light, 255, 235*(1.0+fvar), 210*(1.0+fvar)   ; bianco caldo (piu' chiaro)
-	LightRange light, CELL * 6.0 * (1.0 + fvar)             ; brillantezza +<=4% in fiammata
+	LightRange light, CELL * 6.6 * (1.0 + fvar)            ; +10% intensita' torcia; brillantezza +<=4% in fiammata
 	RenderWorld
 
 	; barra azioni nera a destra (il viewport 3D copre solo VIEW_W a sinistra)

@@ -299,6 +299,32 @@ static void Bridge_DumpPalette(const char *folder)
   fclose(pf);
 }
 
+// ---- estrazione GRAFICHE decorazioni di pavimento (il "ciuffo d'erba") ------
+// Le decorazioni random di pavimento sono basic-graphics (stesso formato planare
+// delle porte). I numeri grafica base sono in d.LoadedFloorDecorations[i][0]
+// (l'ordinale i+1 restituito da RandomWallDecoration -> DECOR). Dumpiamo tutte
+// quelle caricate per il livello corrente in decorgfx/g<N>.raw + decor.txt +
+// palette.txt: il decoder (gfx_decode.py) le converte in PNG, il 3D le pesca
+// per numero grafica. Rispetta il modello degli altri export (doors/, jambs/).
+static int Bridge_ExportDecorGfx(void)
+{
+  mkdir("decorgfx", 0755);
+  FILE *m = fopen("decorgfx/decor.txt", "w");
+  if (m == NULL) return 0;
+  int saved = 0;
+  for (int i = 0; i < 16; i++)
+  {
+    int N = (int)d.LoadedFloorDecorations[i][0];
+    if (N <= 0) continue;
+    if (Bridge_DumpGfx("decorgfx", m, N)) saved++;
+  }
+  fclose(m);
+  Bridge_DumpPalette("decorgfx");
+  printf("[bridge] grafiche decorazioni pavimento: %d salvate -> decorgfx/\n", saved);
+  fflush(stdout);
+  return saved;
+}
+
 // ---- estrazione STIPITI (telai/assi laterali delle porte) -----------------
 // I telai porta NON sono accessibili come basic-graphics (ppUnExpandedGraphics
 // 77.. e' NULL: il motore li espande direttamente nei buffer pDoorBitmaps[0..7]
@@ -868,6 +894,104 @@ static void EmitMonstersNearby(FILE *f)
         first = false;
       }
   fprintf(f, "%s],\n", first ? "" : "\n  ");
+}
+
+// ---- oggetti a terra vicini (dinamico, per-tick) -------------------------
+// Scandisce le celle in un raggio attorno al party e, per ogni cella, elenca
+// gli OGGETTI POSATI sul pavimento (weapon/cloth/scroll/potion/chest/misc).
+// Salta porte/teleporter/testi/attuatori/mostri (dbType 0..4): quelli non sono
+// "cose" prendibili. Per ognuno riporta: coordinate griglia (x,y), il quadrante
+// sul tile (pos 0..3), il dbType, il NameIndex (objNI, 0..198) e il nome
+// leggibile da d.ObjectNames[]. Questo e' l'esatto oggetto che il 2D disegna
+// sdraiato sul pavimento (il "verde" su cui sta il party). Formato a righe:
+//   <count>
+//   poi per ogni oggetto 6 righe: x / y / pos / dbType / objNI / nome
+static const char *ObjNameSafe(int objNI)
+{
+  if (objNI < 0 || objNI >= 199) return "?";
+  const char *s = d.ObjectNames[objNI];
+  return (s != NULL) ? s : "?";
+}
+
+static void EmitFloorText(FILE *f)
+{
+  int px = d.partyX, py = d.partyY;
+  int x0 = px - BRIDGE_MON_RADIUS, x1 = px + BRIDGE_MON_RADIUS;
+  int y0 = py - BRIDGE_MON_RADIUS, y1 = py + BRIDGE_MON_RADIUS;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= d.width)  x1 = d.width - 1;
+  if (y1 >= d.height) y1 = d.height - 1;
+
+  int    xA[512], yA[512], posA[512], typA[512], niA[512];
+  const char *nmA[512];
+  int cnt = 0;
+
+  for (int y = y0; y <= y1 && cnt < 512; y++)
+    for (int x = x0; x <= x1 && cnt < 512; x++)
+      for (RN o = FindFirstObject(x, y); o != RNeof && cnt < 512;
+           o = GetDBRecordLink(o))
+      {
+        int t = (int)o.dbType();
+        if (t <= dbMONSTER) continue;   // 0=door..4=monster: non sono cose a terra
+        if (t > dbMISC) continue;       // >10: pool/missile/cloud, non oggetti posati
+        int objNI = (int)o.NameIndex();
+        xA[cnt]   = x;
+        yA[cnt]   = y;
+        posA[cnt] = (int)(o.pos() & 3);
+        typA[cnt] = t;
+        niA[cnt]  = objNI;
+        nmA[cnt]  = ObjNameSafe(objNI);
+        cnt++;
+      }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n%d\n%s\n",
+            xA[i], yA[i], posA[i], typA[i], niA[i], nmA[i]);
+}
+
+// ---- decorazioni di pavimento vicine (dinamico, per-tick) ----------------
+// Il "ciuffo d'erba" del 2D NON e' un oggetto: e' una decorazione di pavimento
+// PROCEDURALE. Per ogni cella di pavimento aperto il motore calcola un ordinale
+// via RandomWallDecoration(cellFlags&8, NumRandomFloorDecorations, x, y, 30) =
+// Hash deterministico di (x,y,livello,dimensioni). Qui chiamiamo la STESSA
+// funzione del motore, cosi' il risultato e' identico bit-per-bit a quello che
+// il viewport 2D disegna. Esportiamo, per le celle nel raggio attorno al party:
+//   count, poi per cella 4 righe: x / y / ordinale / graphicNumber(base)
+// dove graphicNumber = LoadedFloorDecorations[ord-1][0] e' il numero grafico
+// reale in graphics.dat (utile per estrarre l'immagine del ciuffo).
+static void EmitDecorText(FILE *f)
+{
+  // Le decorazioni sono statiche e deterministiche: scandiamo l'INTERO livello
+  // (non solo il raggio attorno al party), cosi' il 3D costruisce tutti i decal
+  // una volta sola al caricamento. ~361 celle: costo trascurabile.
+  int x0 = 0, x1 = d.width - 1;
+  int y0 = 0, y1 = d.height - 1;
+
+  int nRand = (d.pCurLevelDesc != NULL)
+                ? (int)d.pCurLevelDesc->NumRandomFloorDecorations() : 0;
+
+  int xA[512], yA[512], ordA[512], gnA[512];
+  int cnt = 0;
+
+  for (int y = y0; y <= y1 && cnt < 512; y++)
+    for (int x = x0; x <= x1 && cnt < 512; x++)
+    {
+      int cf = (int)GetCellFlags(x, y);
+      int roomType = (cf >> 5) & 7;
+      if (roomType != roomOPEN) continue;          // erba solo su pavimento aperto
+      int ord = (int)RandomWallDecoration((i16)(cf & 8), (i16)nRand, x, y, 30);
+      if (ord <= 0) continue;
+      int gi = ord - 1;
+      int gn = (gi >= 0 && gi < 16) ? (int)d.LoadedFloorDecorations[gi][0] : -1;
+      xA[cnt] = x; yA[cnt] = y; ordA[cnt] = ord; gnA[cnt] = gn;
+      cnt++;
+    }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n", xA[i], yA[i], ordA[i], gnA[i]);
 }
 
 // Indici degli attributi in CHARDESC::Attributes[7] (vedi CSB.h:2564).
@@ -1580,6 +1704,10 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //   MAP         ->  "OK <n>" + n righe (formato dm_level_<N>.txt, livello corrente)
 //   TEXTS       ->  "OK <n>" + n righe (formato dm_texts_<N>.txt)
 //   PLATES      ->  "OK <n>" + n righe (formato dm_plates_<N>.txt)
+//   FLOOR       ->  "OK <n>" + oggetti a terra vicini (6 righe/oggetto:
+//                   x/y/pos/dbType/objNI/nome)
+//   DECOR       ->  "OK <n>" + decorazioni di pavimento vicine (4 righe/cella:
+//                   x/y/ordinale/graphicNumber)
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
 //   CHAMP <ord> ->  "OK 29" + scheda campione: nome/titolo/sesso/hp/stamina/
 //                   mana/7 attributi/16 skill ("ERR nochamp" se non esiste)
@@ -1754,6 +1882,21 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitDoorOrnText);
+  }
+  else if (strcmp(line, "FLOOR") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitFloorText);
+  }
+  else if (strcmp(line, "DECOR") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitDecorText);
+  }
+  else if (strcmp(line, "DECORGFX") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else { Bridge_ExportDecorGfx(); BridgeSrv_Queue(c, "OK 0\n", 5); }
   }
   else if (strcmp(line, "PORTRAITS") == 0)
   {

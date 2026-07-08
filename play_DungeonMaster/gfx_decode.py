@@ -48,7 +48,10 @@ def postprocess(img, N, pal):
                     px[x, y] = (r, g, b, 0)
     return img
 
-def decode(raw, w, h, stride, pal):
+def decode(raw, w, h, stride, pal, tkey=0):
+    # tkey = indice-colore trasparente (default 0). Le decorazioni di pavimento
+    # DM usano l'indice 10 come color-key (vedi TAG0088b2 in DrawFloorDecorations,
+    # ultimo parametro = 10), non lo 0.
     img = Image.new("RGBA", (w, h))
     px = img.load()
     groups = (w + 15) // 16
@@ -66,12 +69,13 @@ def decode(raw, w, h, stride, pal):
                 bit = 15 - b
                 idx = ((p0>>bit)&1) | (((p1>>bit)&1)<<1) | (((p2>>bit)&1)<<2) | (((p3>>bit)&1)<<3)
                 r, gg, bb = pal[idx]
-                px[x, y] = (r, gg, bb, 0 if idx == 0 else 255)
+                px[x, y] = (r, gg, bb, 0 if idx == tkey else 255)
     return img
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "."
     scale = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
+    tkey = int(sys.argv[3]) if len(sys.argv) > 3 else 0   # indice trasparente
     pal = load_palette(os.path.join(base, "palette.txt"))
     man = glob.glob(os.path.join(base, "*.txt"))
     # esclusi: palette e file di METADATI (non-manifest) esportati dal bridge
@@ -87,7 +91,7 @@ def main():
             continue
         N, w, h, stride = (int(x) for x in p[:4])
         raw = open(os.path.join(base, "g%d.raw" % N), "rb").read()
-        img = postprocess(decode(raw, w, h, stride, pal), N, pal)
+        img = postprocess(decode(raw, w, h, stride, pal, tkey), N, pal)
         big = img.resize((int(round(w*scale)), int(round(h*scale))), Image.NEAREST)
         out = os.path.join(base, "g%d.png" % N)
         big.save(out)

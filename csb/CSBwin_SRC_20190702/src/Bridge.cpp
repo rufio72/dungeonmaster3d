@@ -1000,8 +1000,12 @@ static void EmitDecorText(FILE *f)
 // (Codea59a.cpp:340, ramo attuatore -> decorations[2]). Nel 3D NON usiamo quella
 // grafica: il viewer ci disegna sopra una lastra quadrata sottile texturizzata
 // come il pavimento. Qui riportiamo solo DOVE stanno: scandiamo l'intero livello
-// e, per ogni cella di pavimento aperto con un attuatore wallGraphicOrdinal in
-// [1..NumFloorDecorations], emettiamo x, y, ordinale. Formato:
+// e, per ogni cella con un attuatore wallGraphicOrdinal in
+// [1..NumFloorDecorations], emettiamo x, y, ordinale. Oltre al pavimento aperto
+// contano anche le celle TELEPORTER: il 2D ci disegna la decorazione (il case
+// roomTELEPORTER salta a tag00a85c e quindi al loop attuatori) e il DM
+// originale ne ha 22 sui livelli 2/3/5/9/10 - verificato su dungeon.dat.
+// Formato:
 //   count, poi 3 righe/pedana: x / y / ordinale
 static void EmitPedaneText(FILE *f)
 {
@@ -1014,7 +1018,8 @@ static void EmitPedaneText(FILE *f)
     for (int x = 0; x < d.width && cnt < 512; x++)
     {
       int cf = (int)GetCellFlags(x, y);
-      if (((cf >> 5) & 7) != roomOPEN) continue;      // pedane su pavimento aperto
+      int room = (cf >> 5) & 7;
+      if (room != roomOPEN && room != roomTELEPORTER) continue;
       for (RN o = FindFirstObject(x, y); o != RNeof; o = GetDBRecordLink(o))
       {
         if (o.dbType() != dbACTUATOR) continue;
@@ -1035,6 +1040,99 @@ static void EmitPedaneText(FILE *f)
   fprintf(f, "%d\n", cnt);
   for (int i = 0; i < cnt; i++)
     fprintf(f, "%d\n%d\n%d\n", xA[i], yA[i], ordA[i]);
+}
+
+// ---- decorazioni murali random (statico, per livello) ---------------------
+// Il 2D decora i muri di pietra con ornamenti PROCEDURALI per-faccia: i bit
+// 0-3 dei cellflags della cella-muro abilitano la decorazione su UNA faccia
+// (la maschera dipende dal facing: SummarizeStoneRoom, Codea59a.cpp:47-70) e
+// l'ordinale esce da RandomWallDecoration con P4 funzione della faccia. Qui
+// emettiamo, per ogni faccia di muro adiacente a una cella calpestabile, la
+// decorazione che il 2D disegna guardandola FRONTALMENTE (decorations[1]:
+// vista di lato l'originale usa hash diversi, ma nel 3D la faccia e' una
+// sola e la vista frontale e' quella canonica). Un attuatore con grafica, un
+// ritratto (tipo 127) o un testo visibile sulla stessa faccia SOVRASCRIVONO
+// l'ornamento random nel 2D (stesso slot): quelle facce le saltiamo, hanno
+// gia' i loro canali (PORTRAITS/TEXTS; i dispositivi arriveranno a parte).
+// Formato (stessa convenzione dei ritratti: cella calpestabile + dir muro):
+//   count, poi 7 righe/decorazione:
+//   fx / fy / dir(0=O 1=E 2=N 3=S) / tipoT / graphicNear / wPix / hPix
+static void EmitWallDecText(FILE *f)
+{
+  int W = d.width, H = d.height;
+  static const int DDX[4]   = { -1, 1, 0, 0 };   // cella -> muro, per dir
+  static const int DDY[4]   = { 0, 0, -1, 1 };
+  static const int DFACE[4] = { 3, 1, 0, 2 };    // party facing che vede la faccia
+  static const int DMASK[4] = { 4, 1, 2, 8 };    // bit cellflags della faccia (rear)
+  int nRand = (d.pCurLevelDesc != NULL)
+                ? (int)d.pCurLevelDesc->NumRandomWallDecoration() : 0;
+
+  int fxA[1024], fyA[1024], dirA[1024], tA[1024], gA[1024], wA[1024], hA[1024];
+  int cnt = 0;
+  if (nRand > 0)
+  for (int fy = 0; fy < H && cnt < 1024; fy++)
+    for (int fx = 0; fx < W && cnt < 1024; fx++)
+    {
+      int cf = (int)GetCellFlags(fx, fy);
+      int room = (cf >> 5) & 7;
+      // cella di osservazione: calpestabile (tutto tranne pietra e falso
+      // muro chiuso); da qui la faccia del muro adiacente e' visibile
+      if (room == roomSTONE) continue;
+      if (room == roomFALSEWALL && (cf & 4) == 0) continue;
+      for (int dir = 0; dir < 4 && cnt < 1024; dir++)
+      {
+        int wx = fx + DDX[dir], wy = fy + DDY[dir];
+        if (wx < 0 || wx >= W || wy < 0 || wy >= H) continue;
+        int wcf = (int)GetCellFlags(wx, wy);
+        if (((wcf >> 5) & 7) != roomSTONE) continue;   // solo pietra vera
+        if ((wcf & DMASK[dir]) == 0) continue;         // faccia senza decorazione
+        int face = (DFACE[dir] + 2) & 3;               // normale della faccia (pos DM)
+        // ornamento esplicito sulla stessa faccia? allora il 2D lo disegna
+        // al posto della decorazione random: qui la faccia va saltata
+        bool overridden = false;
+        for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+        {
+          if (((int)o.pos() & 3) != face) continue;
+          if (o.dbType() == dbTEXT)
+          {
+            DBCOMMON *a = GetCommonAddress(o);
+            if (a != NULL && a->CastToDB2() != NULL && a->CastToDB2()->show())
+              { overridden = true; break; }
+          }
+          else if (o.dbType() == dbACTUATOR)
+          {
+            DBCOMMON *a = GetCommonAddress(o);
+            DB3 *p = (a != NULL) ? a->CastToDB3() : NULL;
+            if (p == NULL) continue;
+            if (p->actuatorType() == 127) { overridden = true; break; }
+            if (p->actuatorType() != 47 && p->wallGraphicOrdinal() > 0)
+              { overridden = true; break; }
+          }
+        }
+        if (overridden) continue;
+        int fc = DFACE[dir];
+        int ord = (int)RandomWallDecoration((i16)(wcf & DMASK[dir]), (i16)nRand,
+                                            wx, (wy + 1) * (((fc + 2) & 3) + 1), 30);
+        if (ord <= 0) continue;
+        int T  = (int)d.WallDecorationTOC[ord - 1];
+        int gn = 121 + 2 * T + 1;                      // variante near (grande)
+        int gw = 0, gh = 0;
+        ui8 *ux = (ui8 *)d.ppUnExpandedGraphics[gn];
+        if (ux != NULL)
+        {
+          gw = (int)(ui16)LE16(*(i16 *)ux);
+          gh = (int)(ui16)LE16(*(i16 *)(ux + 2));
+        }
+        fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir;
+        tA[cnt] = T; gA[cnt] = gn; wA[cnt] = gw; hA[cnt] = gh;
+        cnt++;
+      }
+    }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n%d\n%d\n%d\n",
+            fxA[i], fyA[i], dirA[i], tA[i], gA[i], wA[i], hA[i]);
 }
 
 // Indici degli attributi in CHARDESC::Attributes[7] (vedi CSB.h:2564).
@@ -1753,6 +1851,8 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //                   x/y/ordinale/graphicNumber)
 //   PEDANE      ->  "OK <n>" + pedane (attuatori con grafica di pavimento):
 //                   3 righe/pedana: x/y/ordinale
+//   WALLDEC     ->  "OK <n>" + decorazioni murali random per-faccia (7 righe:
+//                   fx/fy/dir/tipoT/graphicNear/wPix/hPix)
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
 //   CHAMP <ord> ->  "OK 29" + scheda campione: nome/titolo/sesso/hp/stamina/
 //                   mana/7 attributi/16 skill ("ERR nochamp" se non esiste)
@@ -1947,6 +2047,11 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitPedaneText);
+  }
+  else if (strcmp(line, "WALLDEC") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitWallDecText);
   }
   else if (strcmp(line, "PORTRAITS") == 0)
   {

@@ -633,6 +633,82 @@ If BridgeReq("TEXTS") >= 1 Then
 	Next
 EndIf
 
+; ------------------------------------------------ decorazioni murali random
+; Gli ornamenti PROCEDURALI dei muri di pietra (gancio, muschio, anello di
+; legno, crepe...): il 2D li calcola per-faccia (bit 0-3 dei flags della
+; cella-muro + hash RandomWallDecoration, vedi SummarizeStoneRoom). Il bridge
+; (comando WALLDEC) replica la STESSA logica del motore e manda le facce
+; decorate con la convenzione dei ritratti: fx, fy (cella calpestabile), dir
+; del muro (0=O 1=E 2=N 3=S), tipo T, numero grafica e dimensioni 2D in px.
+; Texture dalla libreria LOCALE walldec/t<T>.png (generata una tantum da
+; wall_decode.py; walldec/t<T>_custom.png vince sempre, mai sovrascritta).
+Const WDEC_T# = 0.02              ; mezzo-spessore del decal sul muro
+Dim wdecTex(63)                   ; cache texture per tipo decorazione
+If BridgeReq("WALLDEC") >= 1 Then
+	wdcount = Int(brLine$(0))
+	wdk = 1
+	For i = 1 To wdcount
+		fx  = Int(brLine$(wdk))
+		fy  = Int(brLine$(wdk+1))
+		dir = Int(brLine$(wdk+2))
+		wdt = Int(brLine$(wdk+3))              ; tipo decorazione T
+		wdw = Int(brLine$(wdk+5))              ; wdk+4 = graphicNumber (non serve)
+		wdh = Int(brLine$(wdk+6))
+		wdk = wdk + 7
+		If wdw <= 0 Then wdw = 32
+		If wdh <= 0 Then wdh = 32
+		If fx >= 0 And fx < W And fy >= 0 And fy < H And wdt >= 0 And wdt < 64 Then
+			; il GANCIO (tipo 4) e' in vera geometria 3D: placca d'ottone
+			; inchiodata + gancio nero (BuildWallHook, dm3d_world.bb).
+			; Gli altri tipi restano decal texturizzati.
+			If wdt = 4 Then
+				cxw# = (W-1-fx)*CELL
+				czw# = fy*CELL
+				hky# = CELL*0.62               ; placca sopra la mezzeria (come il 2D)
+				hnear# = CELL/2.0 - 0.02
+				If dir = 0 Then BuildWallHook(cxw + hnear, hky, czw, 90)
+				If dir = 1 Then BuildWallHook(cxw - hnear, hky, czw, -90)
+				If dir = 2 Then BuildWallHook(cxw, hky, czw - hnear, 0)
+				If dir = 3 Then BuildWallHook(cxw, hky, czw + hnear, 180)
+				Goto wdecNext
+			EndIf
+			If wdecTex(wdt) = 0 Then
+				; asset EDITABILE: la versione ridipinta a mano vince sempre
+				cust$ = "walldec/t" + wdt + "_custom.png"
+				If FileType(cust$) = 1 Then
+					wdecTex(wdt) = LoadTexture(cust$, 2)                 ; flag 2 = alpha
+				Else
+					wdecTex(wdt) = LoadTexture("walldec/t" + wdt + ".png", 2)
+				EndIf
+				; origine top-left del PNG vs campionamento bottom-left GL
+				; (stesso flip verticale di targhe e ritratti)
+				If wdecTex(wdt) <> 0 Then ScaleTexture wdecTex(wdt), 1, -1
+			EndIf
+			If wdecTex(wdt) <> 0 Then
+				cxw# = (W-1-fx)*CELL           ; stessa proiezione riflessa su X della camera
+				czw# = fy*CELL
+				; ingombro dal 2D: il muro frontale riempie il viewport 224x136,
+				; quindi w/224 e h/136 sono le frazioni di parete coperte
+				dw# = (CELL * wdw) / 224.0 / 2.0
+				dh# = (CELL * wdh) / 136.0 / 2.0
+				ox# = 0.0 : oz# = 0.0
+				sx# = dw : sz# = dw            ; uno dei due diventa lo spessore
+				near# = CELL/2.0 - 0.10        ; appena davanti alla superficie del muro
+				If dir = 0 Then ox = +near : sx = WDEC_T   ; muro a +X (griglia ovest)
+				If dir = 1 Then ox = -near : sx = WDEC_T   ; muro a -X (griglia est)
+				If dir = 2 Then oz = -near : sz = WDEC_T   ; muro a -Z (griglia nord)
+				If dir = 3 Then oz = +near : sz = WDEC_T   ; muro a +Z (griglia sud)
+				wdec = CreateCube()
+				ScaleEntity wdec, sx, dh, sz
+				PositionEntity wdec, cxw + ox, EYE, czw + oz
+				EntityColor wdec, 255, 255, 255
+				EntityTexture wdec, wdecTex(wdt)
+			EndIf
+		EndIf
+		.wdecNext
+	Next
+EndIf
+
 ; ---------------------------------------------------------------- loop live
 px = W/2 : py = H/2 : pf = 0      ; default finche' non leggiamo lo stato
 

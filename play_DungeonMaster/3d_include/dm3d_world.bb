@@ -251,3 +251,74 @@ Function BuildDoorFrame(cx#, cz#, thinX)
 		If jambtex <> 0 Then EntityTexture post, jambtex
 	Next
 End Function
+
+; =========================================================================
+; GANCIO DA MURO IN GEOMETRIA 3D (decorazione murale DM tipo 4)
+; Nel 2D e' la grafica g130: placca di ottone inchiodata al muro con 4
+; chiodi e un gancio nero appeso (appendi-abiti/carne). Qui lo costruiamo
+; in vera geometria: pivot appoggiato alla faccia del muro con +Z locale
+; che punta FUORI dal muro; i figli usano coordinate LOCALI (PositionEntity
+; sui figli di un pivot e' locale di default).
+;   wx,wy,wz = punto sulla superficie del muro; yaw = orientamento faccia
+; =========================================================================
+Function BuildWallHook(wx#, wy#, wz#, yaw#)
+	piv = CreatePivot()
+	PositionEntity piv, wx, wy, wz
+	RotateEntity piv, 0, yaw, 0
+
+	; cornice scura di fondo (leggermente piu' grande, quasi a filo muro)
+	fr = CreateCube(piv)
+	ScaleEntity fr, 0.30, 0.215, 0.014
+	PositionEntity fr, 0, 0, 0.014
+	EntityColor fr, 82, 46, 18
+
+	; PLACCA di ottone
+	pl = CreateCube(piv)
+	ScaleEntity pl, 0.27, 0.185, 0.024
+	PositionEntity pl, 0, 0, 0.030
+	EntityColor pl, 202, 118, 44
+	EntityShininess pl, 0.55
+
+	; 4 CHIODI agli angoli (teste tonde grigio-ferro, appena sporgenti)
+	For i = 0 To 3
+		nx# = 0.20 : ny# = 0.125
+		If (i And 1) Then nx = -nx
+		If (i And 2) Then ny = -ny
+		na = CreateSphere(8, piv)
+		ScaleEntity na, 0.032, 0.032, 0.020
+		PositionEntity na, nx, ny, 0.058
+		EntityColor na, 168, 168, 172
+		EntityShininess na, 0.4
+	Next
+
+	; GANCIO nero: borchia di attacco al centro della placca, gambo che
+	; scende, poi la curva a J che risale IN FUORI (via dal muro)
+	kb = CreateSphere(8, piv)
+	ScaleEntity kb, 0.052, 0.052, 0.045
+	PositionEntity kb, 0, 0.03, 0.070
+	EntityColor kb, 28, 28, 32
+
+	sh = CreateCylinder(10, True, piv)             ; gambo verticale
+	ScaleEntity sh, 0.034, 0.225, 0.034
+	PositionEntity sh, 0, 0.03 - 0.21, 0.085
+	EntityColor sh, 28, 28, 32
+	EntityShininess sh, 0.3
+
+	; curva: due segmenti inclinati (piegano in fuori) + punta a sferetta
+	b1 = CreateCylinder(10, True, piv)
+	ScaleEntity b1, 0.032, 0.085, 0.032
+	PositionEntity b1, 0, 0.03 - 0.425, 0.125
+	RotateEntity b1, -48, 0, 0
+	EntityColor b1, 28, 28, 32
+
+	b2 = CreateCylinder(10, True, piv)
+	ScaleEntity b2, 0.030, 0.080, 0.030
+	PositionEntity b2, 0, 0.03 - 0.44, 0.215
+	RotateEntity b2, -115, 0, 0
+	EntityColor b2, 28, 28, 32
+
+	tp = CreateSphere(8, piv)                      ; punta
+	ScaleEntity tp, 0.034, 0.034, 0.034
+	PositionEntity tp, 0, 0.03 - 0.40, 0.262
+	EntityColor tp, 28, 28, 32
+End Function

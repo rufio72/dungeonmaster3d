@@ -43,9 +43,12 @@ SLICES   = {28: (19, 18, 13)}      # (passo, larghezza, altezza)
 SCALE2   = (10, 42, 43, 44, 45, 46, 47, 48)
 # SILHOUETTE: per il pannello attacco il 2D NON blitta l'icona a colori ma
 # la rimappa con ShrinkBLT + color map Byte20194 (Character.cpp:4880):
-# sfondo->ciano, colori visibili->NERO. Emettiamo quindi g<N>_2s.png (scala
-# 2, NON specchiata): pixel visibili neri, resto trasparente — il viewer la
-# affetta con LoadAnimImage (celle 32x32) e la disegna sul riquadro ciano.
+# sfondo->ciano, colori visibili->NERO. Emettiamo CELLE SINGOLE 32x32
+# icons/sil_<a>_<cl>.png (a = N-42) da usare con LoadImage+DrawImage.
+# NON un atlante LoadAnimImage: il runtime GL scambia le righe dei frame
+# negli atlanti a 2 righe (frame 5 <-> 21, verificato con test dedicato),
+# mentre le immagini singole sono dritte (stesso schema del cursore
+# drag-and-drop, icons/icon_<a>_<cl>.png).
 SILHOUETTE = (42, 43, 44, 45, 46, 47, 48)
 
 def postprocess(img, N, pal):
@@ -116,20 +119,48 @@ def main():
                 two.transpose(Image.FLIP_TOP_BOTTOM).save(
                     os.path.join(base, "g%d_2f.png" % N))
             if N in SILHOUETTE:
-                # lo sfondo delle celle degli atlanti NON e' l'indice 0 ma il
-                # grigio pannello (palette 12 = 72,72,72, opaco): va reso
-                # trasparente, tutto il resto diventa la sagoma nera
+                # ATTENZIONE: nelle celle icona l'indice 0 e' NERO REALE
+                # (es. il manico delle spade), NON un colorkey — la sagoma
+                # va tratta da una decodifica dedicata senza trasparenza
+                # sull'indice 0. Lo sfondo cella e' il grigio pannello
+                # (palette 12 = 72,72,72): e' sfondo solo il grigio
+                # CONNESSO al bordo della cella (flood-fill), cosi' un
+                # eventuale grigio interno all'icona resta sagoma.
                 bg = pal[12]
-                sil = two.copy()
-                spx = sil.load()
-                for sy in range(sil.height):
-                    for sx in range(sil.width):
-                        p = spx[sx, sy]
-                        if p[3] == 0 or (p[0], p[1], p[2]) == bg:
-                            spx[sx, sy] = (0, 0, 0, 0)
-                        else:
-                            spx[sx, sy] = (0, 0, 0, 255)
-                sil.save(os.path.join(base, "g%d_2s.png" % N))
+                opaque = decode(raw, w, h, stride, pal, -1)   # nessun tkey
+                two_s = opaque.resize((w*2, h*2), Image.NEAREST)
+                icdir = os.path.join(base, "icons")
+                os.makedirs(icdir, exist_ok=True)
+                CW2 = 32
+                for cl in range(32):
+                    x0, y0 = (cl % 16) * CW2, (cl // 16) * CW2
+                    cell = two_s.crop((x0, y0, x0 + CW2, y0 + CW2))
+                    cpx = cell.load()
+                    def isbg(x, y):
+                        p = cpx[x, y]
+                        return (p[0], p[1], p[2]) == bg
+                    seen = [[False] * CW2 for _ in range(CW2)]
+                    stack = [(x, y) for x in range(CW2) for y in (0, CW2 - 1)
+                             if isbg(x, y)]
+                    stack += [(x, y) for x in (0, CW2 - 1) for y in range(CW2)
+                              if isbg(x, y)]
+                    while stack:
+                        x, y = stack.pop()
+                        if seen[x][y]:
+                            continue
+                        seen[x][y] = True
+                        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < CW2 and 0 <= ny < CW2 \
+                               and not seen[nx][ny] and isbg(nx, ny):
+                                stack.append((nx, ny))
+                    for y in range(CW2):
+                        for x in range(CW2):
+                            if seen[x][y]:
+                                cpx[x, y] = (0, 0, 0, 0)
+                            else:
+                                cpx[x, y] = (0, 0, 0, 255)
+                    cell.save(os.path.join(icdir, "sil_%d_%d.png" % (N - 42, cl)))
         if N in SLICES:
             pitch, cw, ch = SLICES[N]
             k = 0

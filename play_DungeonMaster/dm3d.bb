@@ -144,11 +144,12 @@ Global atkPanels = 0              ; Word20252: pannelli visibili
 Global atkOrd = 0                 ; AttackingCharacterOrdinal (menu aperto se >0)
 Global atkNum = 0                 ; numero opzioni del menu
 Dim atkName$(2)                   ; nomi azione dal push ("-" = riga vuota)
-Dim invAtlS(6)                    ; atlanti SAGOME a scala 2 (g<N>_2s.png,
-                                  ;   LoadAnimImage celle 32x32: arma = nero)
+Dim atkIcImg(3), atkIcNI(3)       ; cache sagoma arma per slot (LoadImage di
+                                  ;   invgfx/icons/sil_<a>_<cl>.png, 32x32)
 Global invImg10 = 0               ; pannello menu azioni (g10_2f.png)
 Global shadeImg = 0               ; retino nero traslucido (shade.png, 40x70)
 Global atkBase = 0                ; origine Y area attacco (ancorata al pad)
+Global atkOX = 0                  ; origine X dei pannelli arma (= bordo sx pad)
 Dim marchX(3), marchY(3), marchW(3), marchH(3)    ; celle normalizzate (px 2D)
 Global marchN = 0, marchTW = 0, marchTH = 0       ; n. celle e ingombro totale
 Dim palR(15), palG(15), palB(15)  ; palette ST (invgfx/palette.txt)

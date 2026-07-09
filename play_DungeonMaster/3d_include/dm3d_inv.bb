@@ -79,12 +79,12 @@ Function LoadInvGfx()
 		If invAtl(a) = 0 Then okAtl = 0
 		invW612(a) = a*32                  ; default; sovrascritto da layout.txt
 	Next
-	; colonna destra a scala 2 (pannello attacco, HUD-3): atlanti SAGOMA
-	; g<N>_2s (celle 32x32 con alpha, l'arma va disegnata come sagoma NERA
-	; sul riquadro ciano — come ShrinkBLT+Byte20194 nel 2D), pannello del
-	; menu azioni g10_2f e retino d'ombra (pannelli in cooldown)
-	For a = 0 To 6
-		invAtlS(a) = LoadAnimImage("invgfx/g" + (42+a) + "_2s.png", 32, 32, 0, 32)
+	; colonna destra a scala 2 (pannello attacco, HUD-3): pannello del
+	; menu azioni g10_2f e retino d'ombra (pannelli in cooldown). Le
+	; sagome delle armi sono celle singole icons/sil_<a>_<cl>.png caricate
+	; on-demand da AtkIconImg (cache per slot in atkIcImg/atkIcNI)
+	For ci = 0 To 3
+		atkIcNI(ci) = -999
 	Next
 	invImg10 = LoadImage("invgfx/g10_2f.png")
 	shadeImg = LoadImage("shade.png")

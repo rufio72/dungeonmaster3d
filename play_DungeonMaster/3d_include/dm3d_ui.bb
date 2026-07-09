@@ -205,19 +205,26 @@ Function AtkY(y2d)
 	Return atkBase + Int((y2d - 77) * MAGSC)
 End Function
 
-; sagoma NERA dell'icona oggetto (cella 16x16 gioco) dagli atlanti
-; g<N>_2s.png (LoadAnimImage 32x32: DrawImage rispetta l'alpha)
-Function DrawAtkIcon(ni, dx, dy)
-	If ni < 0 Then Return
+; sagoma NERA dell'icona oggetto (cella 16x16 gioco a scala 2): PNG
+; singolo icons/sil_<a>_<cl>.png con cache per slot campione. NON si usa
+; un atlante LoadAnimImage: il runtime GL scambia le righe dei frame
+; negli atlanti a 2 righe (frame 5 <-> 21, verificato con test dedicato);
+; le immagini singole con DrawImage sono dritte e onorano l'alpha
+; (stesso schema del cursore drag-and-drop, icons/icon_<a>_<cl>.png).
+Function AtkIconImg(ci, ni)
+	If atkIcNI(ci) = ni Then Return atkIcImg(ci)
+	If atkIcImg(ci) <> 0 Then FreeImage atkIcImg(ci)
+	atkIcImg(ci) = 0
+	atkIcNI(ci) = ni
 	a = -1
 	For i = 0 To 6                          ; atlante: maggiore base <= ni
 		If ni >= invW612(i) Then a = i
 	Next
-	If a < 0 Then Return
-	If invAtlS(a) = 0 Then Return
+	If a < 0 Then Return 0
 	cl = ni - invW612(a)                    ; cella nell'atlante (16 colonne)
-	If cl < 0 Or cl > 31 Then Return
-	DrawImage invAtlS(a), dx, dy, cl
+	If cl < 0 Or cl > 31 Then Return 0
+	atkIcImg(ci) = LoadImage("invgfx/icons/sil_" + a + "_" + cl + ".png")
+	Return atkIcImg(ci)
 End Function
 
 Function DrawAttackPanel()
@@ -226,11 +233,14 @@ Function DrawAttackPanel()
 	; presto quando non c'e' un caster e lascerebbe magOX/magOY a zero
 	magOX = VIEW_W + (BAR_W - Int(96 * MAGSC)) / 2
 	magOY = BARH + 8
-	; bordo inferiore dell'area (y2d=121) a 8px dal bordo del pad frecce
+	; area agganciata al pad frecce: bordo inferiore (y2d=121) a 8px dal
+	; pad, bordo SINISTRO dei pannelli allineato al bordo sinistro del pad
 	If mvImg <> 0 Then
 		atkBase = WINH - ImageHeight(mvImg) - 14 - 8 - Int(45*MAGSC)
+		atkOX = VIEW_W + (BAR_W - ImageWidth(mvImg)) / 2
 	Else
 		atkBase = magOY + Int((77 - 42) * MAGSC)  ; pad non ancora caricato
+		atkOX = MagX(233)
 	EndIf
 
 	If atkOrd >= 1 And atkOrd <= 4 Then
@@ -267,9 +277,10 @@ Function DrawAttackPanel()
 		If ci >= 0 And ci <= 3 Then
 			If hcAct(ci) Then
 				; il rect DISEGNATO e' quello di DrawAttackButton (20x35 a
-				; passo 22 da x=233, y 86..120 inclusivi); i rect di
-				; Buttons17952 servono solo all'hit-test in AttackUI
-				px = MagX(233 + 22*ci) : py = AtkY(86)
+				; passo 22, y 86..120 inclusivi) con x=233 rimappato sul
+				; bordo sinistro del pad (atkOX); i rect di Buttons17952
+				; servono solo all'hit-test in AttackUI
+				px = atkOX + Int(22*ci*MAGSC) : py = AtkY(86)
 				pw = Int(20*MAGSC) : ph = Int(35*MAGSC)
 				If hcAtkNI(ci) = -2 Then
 					Color 0, 0, 0                   ; morto: box nero
@@ -280,7 +291,8 @@ Function DrawAttackPanel()
 					; arma/pugno = sagoma nera (a y 95..110 come LOCAL_16);
 					; hcAtkNI = -1 (arma senza azioni): resta tutto ciano
 					If hcAtkNI(ci) >= 0 Then
-						DrawAtkIcon(hcAtkNI(ci), MagX(233 + 22*ci + 2), AtkY(95))
+						sic = AtkIconImg(ci, hcAtkNI(ci))
+						If sic <> 0 Then DrawImage sic, atkOX + Int((22*ci + 2)*MAGSC), AtkY(95)
 					EndIf
 					If hcAtkDis(ci) Then
 						If shadeImg <> 0 Then DrawImage shadeImg, px, py
@@ -298,10 +310,12 @@ End Function
 ; numero di opzioni valide (Word20248) li applica il dispatch 2D.
 Function AttackUI()
 	If gClick = 0 Or bridge = 0 Or hudValid = 0 Then Return
-	x2 = 224 + Int((MouseX() - magOX) / MAGSC)
 	y2 = 77 + Int((MouseY() - atkBase) / MAGSC)
-	If x2 < 224 Or x2 > 319 Or y2 < 77 Or y2 > 121 Then Return
+	If y2 < 77 Or y2 > 121 Then Return
 	If atkOrd >= 1 And atkOrd <= 4 Then
+		; menu aperto: origine X della colonna (il menu e' largo 96px 2D)
+		x2 = 224 + Int((MouseX() - magOX) / MAGSC)
+		If x2 < 224 Or x2 > 319 Then Return
 		For b = 0 To obtN-1
 			If x2 >= obtBX1(b) And x2 < obtBX2(b) And y2 >= obtBY1(b) And y2 < obtBY2(b) Then
 				WriteLine bridge, "ATTACK " + obtCode(b)
@@ -310,6 +324,9 @@ Function AttackUI()
 			EndIf
 		Next
 	Else If atkPanels Then
+		; pannelli: origine X = bordo sinistro del pad (x2d 233 -> atkOX)
+		x2 = 233 + Int((MouseX() - atkOX) / MAGSC)
+		If x2 < 233 Or x2 > 319 Then Return
 		For b = 0 To atkN-1
 			ci = atkCode(b) - 116
 			If ci >= 0 And ci <= 3 Then

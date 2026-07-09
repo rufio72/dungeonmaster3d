@@ -29,13 +29,18 @@ def load_palette(path):
 # 37-39 (BLT2Screen param 10), freccia pos/dir 28 (TAG0088b2 param 12)
 COLORKEY = {40: 6, 27: 4, 37: 10, 38: 10, 39: 10, 28: 12,
             20: 8, 30: 12, 31: 12, 32: 12}   # pannello FOOD/WATER
-FLIPPED  = (8, 28, 33, 34, 35, 37, 38, 39, 42, 43, 44, 45, 46, 47, 48)
+FLIPPED  = (8, 10, 28, 33, 34, 35, 37, 38, 39, 42, 43, 44, 45, 46, 47, 48)
 # SLICES: grafiche affettate in celle-PNG separate (gNc<i>.png) da disegnare
 # con DrawImage (rispetta l'alpha; DrawImageRect e' una copia raw che
 # schiaccerebbe i pixel trasparenti sul fondo). g28 = figurine pos/dir:
 # passo 19, ma la CELLA del marching-order e' 18x13 (wRectPos1454) — il 2D
 # ritaglia il blit alla cella, quindi affettiamo 18x13 per non sbordare.
 SLICES   = {28: (19, 18, 13)}      # (passo, larghezza, altezza)
+# SCALE2: grafiche usate ANCHE nella colonna destra del viewer (pannello
+# attacco/menu azioni, scala MAGSC=2.0 invece di INVSC=2.75): oltre ai PNG
+# alla scala principale scriviamo g<N>_2.png (e g<N>_2f.png se in FLIPPED)
+# a scala fissa 2.0. 10 = pannello menu azioni, 42-48 = atlanti icone.
+SCALE2   = (10, 42, 43, 44, 45, 46, 47, 48)
 
 def postprocess(img, N, pal):
     if N in COLORKEY:
@@ -98,6 +103,12 @@ def main():
         if N in FLIPPED:
             big.transpose(Image.FLIP_TOP_BOTTOM).save(
                 os.path.join(base, "g%df.png" % N))
+        if N in SCALE2:
+            two = img.resize((w*2, h*2), Image.NEAREST)
+            two.save(os.path.join(base, "g%d_2.png" % N))
+            if N in FLIPPED:
+                two.transpose(Image.FLIP_TOP_BOTTOM).save(
+                    os.path.join(base, "g%d_2f.png" % N))
         if N in SLICES:
             pitch, cw, ch = SLICES[N]
             k = 0

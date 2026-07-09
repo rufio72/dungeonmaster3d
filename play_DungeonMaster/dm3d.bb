@@ -129,6 +129,24 @@ Dim magCode(8)                    ;   107 backspace, 108 cast) da layout.txt,
 Dim magBX1(8), magBX2(8), magBY1(8), magBY2(8)   ;   rect in spazio mouse 2D
 Global mag12X = 224, mag12Y = 42  ; rect Word12 (area pannello, per riferimento)
 Global magOX = 0, magOY = 0       ; origine schermo della barra (calcolata)
+; ---- pannello attacco (HUD-3, ANALISI_HUD_3D.md §2.3) ----------------------
+; Area 2D x 224..319, y 77..120 sotto la barra magie, stessa scala MAGSC e
+; origine MagX/MagY: a menu chiuso 4 pannelli arma 20x35 (DrawAttackButton),
+; a menu aperto il pannello g10 con nome e opzioni (DrawLegalAttackTypes).
+Dim amenuX1(3), amenuX2(3), amenuY1(3), amenuY2(3) ; rect g10 per 1..3 opzioni
+Global atkN = 0                   ; Buttons17952: pannelli arma (116-119)
+Dim atkCode(4), atkBX1(4), atkBX2(4), atkBY1(4), atkBY2(4)
+Global obtN = 0                   ; Buttons17892: menu aperto (112 pass, 113-115)
+Dim obtCode(4), obtBX1(4), obtBX2(4), obtBY1(4), obtBY2(4)
+Dim hcAtkNI(3)                    ; icona pannello: -2 nero (morto), -1 pieno, NI
+Dim hcAtkDis(3)                   ; 1 = ombreggiato (cooldown/provvisorio/sonno)
+Global atkPanels = 0              ; Word20252: pannelli visibili
+Global atkOrd = 0                 ; AttackingCharacterOrdinal (menu aperto se >0)
+Global atkNum = 0                 ; numero opzioni del menu
+Dim atkName$(2)                   ; nomi azione dal push ("-" = riga vuota)
+Dim invAtl2(6)                    ; atlanti icone a scala 2 (g<N>_2f.png)
+Global invImg10 = 0               ; pannello menu azioni (g10_2f.png)
+Global shadeImg = 0               ; retino nero traslucido (shade.png, 40x70)
 Dim marchX(3), marchY(3), marchW(3), marchH(3)    ; celle normalizzate (px 2D)
 Global marchN = 0, marchTW = 0, marchTH = 0       ; n. celle e ingombro totale
 Dim palR(15), palG(15), palB(15)  ; palette ST (invgfx/palette.txt)
@@ -839,6 +857,23 @@ While Not KeyHit(1)
 							spInc(2) = Int(brLine$(sk+9))
 							spInc(3) = Int(brLine$(sk+10))
 						EndIf
+						; blocco ATTACK (HUD-3): 2 righe per slot (icona,
+						; disabled) + Word20252, ordinale attaccante, numero
+						; opzioni e 3 nomi azione
+						If sk + 24 <= pn - 1 Then
+							ak = sk + 11
+							For ci = 0 To 3
+								hcAtkNI(ci)  = Int(brLine$(ak))
+								hcAtkDis(ci) = Int(brLine$(ak+1))
+								ak = ak + 2
+							Next
+							atkPanels   = Int(brLine$(ak))
+							atkOrd      = Int(brLine$(ak+1))
+							atkNum      = Int(brLine$(ak+2))
+							atkName$(0) = brLine$(ak+3)
+							atkName$(1) = brLine$(ak+4)
+							atkName$(2) = brLine$(ak+5)
+						EndIf
 						hudValid = 1
 
 						; ritratti murali: al cambio di composizione del party
@@ -964,6 +999,7 @@ While Not KeyHit(1)
 
 	DrawHUD(pf) ; barra campioni in alto (tutta larghezza, sezione CHAMPS)
 	DrawMagicBar() ; barra magie in cima alla colonna destra (HUD-4)
+	DrawAttackPanel() ; pannelli arma / menu azioni sotto la barra magie (HUD-3)
 
 	Color 255,255,255
 	Text 2, WINH-34, "DM 3D  party (" + px + "," + py + ")  facing " + pf
@@ -1029,6 +1065,7 @@ While Not KeyHit(1)
 	EndIf
 
 	MagicUI()   ; click sulla barra magie (linguette caster, rune, cast)
+	AttackUI()  ; click sui pannelli arma / menu azioni ("ATTACK <code>")
 	MoveUI()    ; frecce di movimento cliccabili (inviano "CMD <n>" via TCP a CSBwin)
 
 	; la VERA schermata dello specchio, pilotata dallo stato del 2D

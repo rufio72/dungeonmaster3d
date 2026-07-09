@@ -45,6 +45,9 @@ static void BridgeSrv_Tick(bool levelReady);   // definiti in fondo al file
 static void BridgeSrv_PushState(void);
 static bool BridgeSrv_HasSubscribers(void);
 static void EmitChampsText(FILE *ft);          // sezione CHAMPS del push (HUD)
+// nomi azione del menu attacco (CSBCode.cpp, non dichiarata in CSB.h)
+const char *ActionNameFilter(const char *defaultName, i32 charIndex,
+                             i32 actionNumber, i32 numAttackOption);
 
 // Log per-dump (~16/s con SUB attivo) solo se richiesto: DM_BRIDGE_VERBOSE=1.
 // I messaggi una-tantum (mappa, ritratti, server in ascolto) restano sempre.
@@ -416,8 +419,10 @@ static int Bridge_ExportDecorGfx(void)
   // 20/30/31/32 = pannello FOOD/WATER (box, label FOOD, label WATER, veleno)
   // 9 = sfondo pannello magia (rune/backspace/cast, blit su Word12 quando
   //     viene selezionato un caster — SelectMagicCaster, Magic.cpp:728)
+  // 10 = pannello del menu azioni d'attacco (blit su wRectPos20202/10/18
+  //      quando si clicca un pannello arma — DrawLegalAttackTypes)
   static const int gfxList[] =
-    { 8, 9, 17, 20, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40,
+    { 8, 9, 10, 17, 20, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40,
       42, 43, 44, 45, 46, 47, 48 };
 
   mkdir("invgfx", 0755);
@@ -501,6 +506,36 @@ static int Bridge_ExportDecorGfx(void)
               (int)d.Buttons18060[i].word0,
               (int)d.Buttons18060[i].xMin, (int)d.Buttons18060[i].xMax,
               (int)d.Buttons18060[i].yMin, (int)d.Buttons18060[i].yMax);
+    }
+    // pannello attacco (HUD-3): rect del menu azioni per 3/2/1 opzioni
+    // (wRectPos20202/20210/20218, dove DrawLegalAttackTypes blitta g10) e le
+    // due button-list di TAG019fac (spazio mouse: code x1 x2 y1 y2):
+    //   abutton = Buttons17952, pannelli 19x34 (116-119, menu CHIUSO)
+    //   obutton = Buttons17892, menu APERTO (112 pass/nome, 113-115 opzioni)
+    fprintf(lf, "amenu3 %d %d %d %d\n",
+            (int)d.wRectPos20202.w.x1, (int)d.wRectPos20202.w.x2,
+            (int)d.wRectPos20202.w.y1, (int)d.wRectPos20202.w.y2);
+    fprintf(lf, "amenu2 %d %d %d %d\n",
+            (int)d.wRectPos20210.w.x1, (int)d.wRectPos20210.w.x2,
+            (int)d.wRectPos20210.w.y1, (int)d.wRectPos20210.w.y2);
+    fprintf(lf, "amenu1 %d %d %d %d\n",
+            (int)d.wRectPos20218.w.x1, (int)d.wRectPos20218.w.x2,
+            (int)d.wRectPos20218.w.y1, (int)d.wRectPos20218.w.y2);
+    for (int i = 0; i < 5; i++)
+    {
+      if (d.Buttons17952[i].word0 == 0) break;
+      fprintf(lf, "abutton %d %d %d %d %d\n",
+              (int)d.Buttons17952[i].word0,
+              (int)d.Buttons17952[i].xMin, (int)d.Buttons17952[i].xMax,
+              (int)d.Buttons17952[i].yMin, (int)d.Buttons17952[i].yMax);
+    }
+    for (int i = 0; i < 5; i++)
+    {
+      if (d.Buttons17892[i].word0 == 0) break;
+      fprintf(lf, "obutton %d %d %d %d %d\n",
+              (int)d.Buttons17892[i].word0,
+              (int)d.Buttons17892[i].xMin, (int)d.Buttons17892[i].xMax,
+              (int)d.Buttons17892[i].yMin, (int)d.Buttons17892[i].yMax);
     }
     fclose(lf);
   }
@@ -1500,6 +1535,50 @@ static int Bridge_InjectSpell(int n)
   return 1;
 }
 
+// ---- comando "ATTACK <n>": pannello attacco / menu azioni (HUD-3) ----------
+// n = 116..119 -> pannello arma del campione n-116: apre il menu azioni
+// n = 112      -> "pass" (banda del nome): chiude il menu senza attaccare
+// n = 113..115 -> opzione 0..2 del menu (ExecuteAttack)
+// Click sintetico codice 111 sul CENTRO del rect della button-list che
+// TAG019fac consulta nello stato corrente (Buttons17952 a menu chiuso,
+// Buttons17892 a menu aperto); guardie, cooldown e numero opzioni valide
+// (Word20248) li applica il dispatch 2D. Stessa filosofia di InjectSpell.
+static int Bridge_InjectAttack(int n)
+{
+  if (d.PotentialCharacterOrdinal != 0) return 0;  // guardia del codice 111
+  if (keyboardMode == 2) return 0;                 // name-entry in corso
+  const btn *list;
+  if (n >= 116 && n <= 119)
+  {
+    if (d.AttackingCharacterOrdinal != 0 || d.Word20252 == 0) return 0;
+    if (n - 116 >= (int)d.NumCharacter) return 0;
+    list = d.Buttons17952;
+  }
+  else if (n >= 112 && n <= 115)
+  {
+    if (d.AttackingCharacterOrdinal == 0) return 0;
+    list = d.Buttons17892;
+  }
+  else return 0;
+  int x = -1, y = -1;
+  for (int i = 0; i < 5; i++)
+  {
+    if (list[i].word0 == 0) break;
+    if ((int)list[i].word0 != n) continue;
+    x = (list[i].xMin + list[i].xMax) / 2;
+    y = (list[i].yMin + list[i].yMax) / 2;
+    break;
+  }
+  if (x < 0) return 0;
+  int q = d.MouseQEnd + 1;
+  if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+  pMouseQueue[q].num = 111;
+  pMouseQueue[q].x = (ui16)x;
+  pMouseQueue[q].y = (ui16)y;
+  d.MouseQEnd = (i16)q;
+  return 1;
+}
+
 // ---- risoluzione slot come la disegnerebbe il 2D ---------------------------
 // Replica DisplayBackpackItem (Character.cpp:1100): slot vuoto -> sagoma
 // segnaposto objNI_Special_*, chest/pergamena aperta in mano-arma -> +1,
@@ -1702,6 +1781,54 @@ static void EmitChampsText(FILE *ft)
   }
   else
     fprintf(ft, "-1\n0\n0\n0\n0\n");
+
+  // blocco ATTACCO (HUD-3, append-only). Per slot, l'icona del pannello
+  // 19x34 come la sceglierebbe DrawAttackButton (Character.cpp:4830):
+  //   -2 = slot vuoto/morto (box nero), -1 = arma senza AttackClass
+  //   (riquadro pieno), altrimenti il NameIndex da disegnare (pugno =
+  //   objNI_Special_c a mano-arma vuota); + flag disabled (cooldown
+  //   CHARFLAG_attackDisable, provvisorio pendente o party addormentato).
+  // Poi lo stato del menu: Word20252 (pannelli visibili), ordinale
+  // dell'attaccante (0 = menu chiuso), numero opzioni e 3 nomi azione
+  // (GetAttackTypeName + ActionNameFilter, come DrawLegalAttackTypes;
+  // "-" = riga vuota).
+  for (int i = 0; i < 4; i++)
+  {
+    CHARDESC *c = &d.CH16482[i];
+    bool active = (i < (int)d.NumCharacter) && c->MaxHP() > 0;
+    int ni = -2, dis = 1;
+    if (active && c->HP() > 0)
+    {
+      RN w = c->Possession(1);
+      if (w == RNnul) ni = (int)objNI_Special_c;
+      else if ((UI8)d.ObjDesc[w.DescIndex()].AttackClass() == 0) ni = -1;
+      else ni = (int)w.NameIndex();
+      dis = ((c->charFlags & CHARFLAG_attackDisable) ||
+             d.PotentialCharacterOrdinal || d.PartySleeping) ? 1 : 0;
+    }
+    fprintf(ft, "%d\n%d\n", ni, dis);
+  }
+  int aord = (int)d.AttackingCharacterOrdinal;
+  int nopt = 0;
+  if (aord >= 1 && aord <= 4)
+  {
+    nopt = 3;
+    if ((i8)d.PossibleAttackTypes[2] == -1) nopt = 2;
+    if ((i8)d.PossibleAttackTypes[1] == -1) nopt = 1;
+  }
+  fprintf(ft, "%d\n%d\n%d\n", (int)d.Word20252, aord, nopt);
+  for (int k = 0; k < 3; k++)
+  {
+    const char *anm = "-";
+    if (aord >= 1 && k < nopt)
+    {
+      anm = GetAttackTypeName((i32)(UI8)d.PossibleAttackTypes[k]);
+      anm = ActionNameFilter(anm, aord - 1, k, nopt);
+      anm = TranslateLanguage(anm);
+      if (anm == NULL || anm[0] == 0) anm = "-";
+    }
+    fprintf(ft, "%s\n", anm);
+  }
 }
 
 // ---- anteprima campione (per il comando TCP "CHAMP <ord>") ----------------
@@ -2138,6 +2265,40 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
       BridgeSrv_Queue(c, "ERR badspell\n", 13);
     else
       BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "ATTACK ", 7) == 0)
+  {
+    // pannello attacco: 116-119 apre il menu, 112 pass, 113-115 opzioni
+    int n = atoi(line + 7);
+    if (!bridgeLevelReady || !Bridge_InjectAttack(n))
+      BridgeSrv_Queue(c, "ERR badattack\n", 14);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "START", 5) == 0)
+  {
+    // avvio della partita da remoto (test/launcher 3D) senza cliccare la
+    // finestra 2D. I menu di CSBwin leggono la STESSA coda mouse del
+    // gioco, con voci a codice diretto:
+    //   211 = "DUNGEON" nel menu master (WaitForMenuSelect, 210-213)
+    //   200 = "Enter Prison", 201 = "Resume" nel titolo DM (Mouse.cpp:1776)
+    // "START" = 211; "START <code>" per gli altri. Sequenza tipica:
+    // START, attesa, poi START 200 finche' STATE non risponde. A livello
+    // caricato il comando e' rifiutato (mai re-iniettare 200 in partita).
+    int code = 211;
+    if (line[5] == ' ') code = atoi(line + 6);
+    if (bridgeLevelReady || (code != 200 && code != 201 && code != 211))
+      BridgeSrv_Queue(c, "ERR badstart\n", 13);
+    else
+    {
+      int q = d.MouseQEnd + 1;
+      if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+      pMouseQueue[q].num = (i16)code;
+      pMouseQueue[q].x = 0;
+      pMouseQueue[q].y = 0;
+      d.MouseQEnd = (i16)q;
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+    }
   }
   else if (strcmp(line, "SUB") == 0)
   {

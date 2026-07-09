@@ -187,6 +187,146 @@ Function MagicUI()
 End Function
 
 ; =========================================================================
+; PANNELLO ATTACCO (HUD-3) — area 2D x 224..319, y 77..120 sotto la barra
+; magie, stessa scala/origine (MagX/MagY). A menu CHIUSO replica i 4
+; pannelli arma 20x35 di DrawAttackButton (Character.cpp:4830): riquadro
+; ciano (palette 4), finestra icona nera 16x16 a (x1+2, 95..110) con
+; l'arma in mano o il pugno (riquadro pieno se l'arma non ha AttackClass),
+; nero se il campione e' morto, retino d'ombra se disabilitato (cooldown
+; dopo l'attacco, provvisorio pendente, party addormentato). A menu APERTO
+; replica DrawLegalAttackTypes (CSBCode.cpp:8770): pannello g10 nel rect
+; del numero di opzioni, nome dell'attaccante NERO sulla banda ciano
+; (baseline 83) e fino a 3 opzioni in CIANO (baseline 93+12*i).
+; =========================================================================
+
+; icona oggetto 16x16 da un atlante a scala 2 (stessa logica di DrawInvIcon
+; ma per la colonna destra a MAGSC; atlanti g<N>_2f.png pre-specchiati)
+Function DrawInvIcon2(ni, dx, dy)
+	If ni < 0 Then Return
+	a = -1
+	For i = 0 To 6                          ; atlante: maggiore base <= ni
+		If ni >= invW612(i) Then a = i
+	Next
+	If a < 0 Then Return
+	If invAtl2(a) = 0 Then Return
+	cl = ni - invW612(a)                    ; cella nell'atlante (16 colonne)
+	If cl < 0 Or cl > 31 Then Return
+	cw = Int(16*MAGSC)
+	sx = (cl Mod 16) * cw
+	sy = (cl / 16) * cw
+	DrawImageRect invAtl2(a), dx, dy, sx, sy, cw, cw
+End Function
+
+Function DrawAttackPanel()
+	If hudValid = 0 Then Return
+	; l'origine della colonna va calcolata anche qui: DrawMagicBar esce
+	; presto quando non c'e' un caster e lascerebbe magOX/magOY a zero
+	magOX = VIEW_W + (BAR_W - Int(96 * MAGSC)) / 2
+	magOY = BARH + 8
+
+	If atkOrd >= 1 And atkOrd <= 4 Then
+		; menu azioni aperto: g10 ritagliato al rect del numero di opzioni
+		k = atkNum
+		If k < 1 Then k = 1
+		If k > 3 Then k = 3
+		mx = MagX(amenuX1(k)) : my = MagY(amenuY1(k))
+		mw = Int((amenuX2(k) - amenuX1(k) + 1) * MAGSC)
+		mh = Int((amenuY2(k) - amenuY1(k) + 1) * MAGSC)
+		If invImg10 <> 0 Then
+			DrawImageRect invImg10, mx, my, 0, 0, mw, mh
+		Else
+			Color 0, 0, 0
+			Rect mx, my, mw, mh, True
+		EndIf
+		; nome nero sulla banda ciano, opzioni in ciano (colori di
+		; DrawLegalAttackTypes: DrawText fg 0 su 4 / fg 4 su 0)
+		ci = atkOrd - 1
+		If ci >= 0 And ci <= 3 Then
+			DMText2 MagX(235), MagY(78), hcName$(ci), fntBlack2
+		EndIf
+		For i = 0 To atkNum-1
+			If atkName$(i) <> "-" Then
+				DMText2 MagX(241), MagY(88 + 12*i), atkName$(i), fntCyan2
+			EndIf
+		Next
+		Return
+	EndIf
+
+	If atkPanels = 0 Then Return
+	For b = 0 To atkN-1
+		ci = atkCode(b) - 116
+		If ci >= 0 And ci <= 3 Then
+			If hcAct(ci) Then
+				; il rect DISEGNATO e' quello di DrawAttackButton (20x35 a
+				; passo 22 da x=233, y 86..120 inclusivi); i rect di
+				; Buttons17952 servono solo all'hit-test in AttackUI
+				px = MagX(233 + 22*ci) : py = MagY(86)
+				pw = Int(20*MAGSC) : ph = Int(35*MAGSC)
+				If hcAtkNI(ci) = -2 Then
+					Color 0, 0, 0                   ; morto: box nero
+					Rect px, py, pw, ph, True
+				Else
+					Color palR(4), palG(4), palB(4) ; riquadro ciano
+					Rect px, py, pw, ph, True
+					If hcAtkNI(ci) >= 0 Then
+						ix = MagX(233 + 22*ci + 2) : iy = MagY(95)
+						iw = Int(16*MAGSC)
+						Color 0, 0, 0               ; finestra icona nera
+						Rect ix, iy, iw, iw, True
+						DrawInvIcon2(hcAtkNI(ci), ix, iy)
+					EndIf
+					; hcAtkNI = -1: arma senza azioni, riquadro resta pieno
+					If hcAtkDis(ci) Then
+						If shadeImg <> 0 Then DrawImage shadeImg, px, py
+					EndIf
+				EndIf
+			EndIf
+		EndIf
+	Next
+End Function
+
+; click nel pannello attacco: pannello arma -> "ATTACK 116+i" (apre il menu
+; azioni), menu aperto -> "ATTACK <code>" (112 pass sulla banda del nome,
+; 113-115 opzioni). Hit-test sui rect VERI delle button-list esportate
+; (xMax/yMax esclusivi come in SearchButtonList); guardie, cooldown e
+; numero di opzioni valide (Word20248) li applica il dispatch 2D.
+Function AttackUI()
+	If gClick = 0 Or bridge = 0 Or hudValid = 0 Then Return
+	x2 = 224 + Int((MouseX() - magOX) / MAGSC)
+	y2 = 42 + Int((MouseY() - magOY) / MAGSC)
+	If x2 < 224 Or x2 > 319 Or y2 < 77 Or y2 > 121 Then Return
+	If atkOrd >= 1 And atkOrd <= 4 Then
+		For b = 0 To obtN-1
+			If x2 >= obtBX1(b) And x2 < obtBX2(b) And y2 >= obtBY1(b) And y2 < obtBY2(b) Then
+				WriteLine bridge, "ATTACK " + obtCode(b)
+				gClick = 0
+				Return
+			EndIf
+		Next
+	Else If atkPanels Then
+		For b = 0 To atkN-1
+			ci = atkCode(b) - 116
+			If ci >= 0 And ci <= 3 Then
+				; inutile aprire il menu di un morto/disabilitato/senza
+				; azioni (icona -1/-2): il 2D lo ignorerebbe comunque
+				; (PrepareAttack esce su attackDisable, HP 0, attackClass 0)
+				ok = 0
+				If hcAct(ci) Then
+					If hcAtkDis(ci) = 0 And hcAtkNI(ci) >= 0 Then ok = 1
+				EndIf
+				If ok Then
+					If x2 >= atkBX1(b) And x2 < atkBX2(b) And y2 >= atkBY1(b) And y2 < atkBY2(b) Then
+						WriteLine bridge, "ATTACK " + atkCode(b)
+						gClick = 0
+						Return
+					EndIf
+				EndIf
+			EndIf
+		Next
+	EndIf
+End Function
+
+; =========================================================================
 ; BARRA CAMPIONI (HUD in alto, tutta larghezza — ANALISI_HUD_3D.md §1-2)
 ; Replica il box 2D 66x29 a passo 69 (DrawCharacterState): nome, 3 barre
 ; verticali HP/STAMINA/MANA (altezza ceil(25*cur/max), dal basso), le due

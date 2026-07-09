@@ -79,6 +79,13 @@ Function LoadInvGfx()
 		If invAtl(a) = 0 Then okAtl = 0
 		invW612(a) = a*32                  ; default; sovrascritto da layout.txt
 	Next
+	; colonna destra a scala 2 (pannello attacco, HUD-3): atlanti g<N>_2f,
+	; pannello del menu azioni g10_2f e retino d'ombra (pannelli in cooldown)
+	For a = 0 To 6
+		invAtl2(a) = LoadImage("invgfx/g" + (42+a) + "_2f.png")
+	Next
+	invImg10 = LoadImage("invgfx/g10_2f.png")
+	shadeImg = LoadImage("shade.png")
 
 	; posizioni IconDisplay: 46 righe "x y" (slot inventario n -> entry n+8)
 	okIcon = 0
@@ -130,6 +137,25 @@ Function LoadInvGfx()
 			Else If Left$(ln$, 6) = "word12" And n >= 4 Then
 				; rect del pannello magia g9 (Word12: x1 x2 y1 y2)
 				mag12X = pliV(0) : mag12Y = pliV(2)
+			Else If Left$(ln$, 7) = "abutton" And n >= 5 And atkN < 5 Then
+				; pannelli arma (Buttons17952: 116-119, spazio mouse 2D)
+				atkCode(atkN) = pliV(0)
+				atkBX1(atkN) = pliV(1) : atkBX2(atkN) = pliV(2)
+				atkBY1(atkN) = pliV(3) : atkBY2(atkN) = pliV(4)
+				atkN = atkN + 1
+			Else If Left$(ln$, 7) = "obutton" And n >= 5 And obtN < 5 Then
+				; menu azioni aperto (Buttons17892: 112 pass, 113-115 opzioni)
+				obtCode(obtN) = pliV(0)
+				obtBX1(obtN) = pliV(1) : obtBX2(obtN) = pliV(2)
+				obtBY1(obtN) = pliV(3) : obtBY2(obtN) = pliV(4)
+				obtN = obtN + 1
+			Else If Left$(ln$, 5) = "amenu" And n >= 4 Then
+				; rect del pannello g10 per k opzioni (amenu<k> x1 x2 y1 y2)
+				k = Int(Mid$(ln$, 6, 1))
+				If k >= 1 And k <= 3 Then
+					amenuX1(k) = pliV(0) : amenuX2(k) = pliV(1)
+					amenuY1(k) = pliV(2) : amenuY2(k) = pliV(3)
+				EndIf
 			Else If Left$(ln$, 7) = "word612" Then
 				For a = 0 To 6
 					If a < n Then invW612(a) = pliV(a)

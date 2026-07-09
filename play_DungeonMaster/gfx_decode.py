@@ -41,6 +41,12 @@ SLICES   = {28: (19, 18, 13)}      # (passo, larghezza, altezza)
 # alla scala principale scriviamo g<N>_2.png (e g<N>_2f.png se in FLIPPED)
 # a scala fissa 2.0. 10 = pannello menu azioni, 42-48 = atlanti icone.
 SCALE2   = (10, 42, 43, 44, 45, 46, 47, 48)
+# SILHOUETTE: per il pannello attacco il 2D NON blitta l'icona a colori ma
+# la rimappa con ShrinkBLT + color map Byte20194 (Character.cpp:4880):
+# sfondo->ciano, colori visibili->NERO. Emettiamo quindi g<N>_2s.png (scala
+# 2, NON specchiata): pixel visibili neri, resto trasparente — il viewer la
+# affetta con LoadAnimImage (celle 32x32) e la disegna sul riquadro ciano.
+SILHOUETTE = (42, 43, 44, 45, 46, 47, 48)
 
 def postprocess(img, N, pal):
     if N in COLORKEY:
@@ -109,6 +115,21 @@ def main():
             if N in FLIPPED:
                 two.transpose(Image.FLIP_TOP_BOTTOM).save(
                     os.path.join(base, "g%d_2f.png" % N))
+            if N in SILHOUETTE:
+                # lo sfondo delle celle degli atlanti NON e' l'indice 0 ma il
+                # grigio pannello (palette 12 = 72,72,72, opaco): va reso
+                # trasparente, tutto il resto diventa la sagoma nera
+                bg = pal[12]
+                sil = two.copy()
+                spx = sil.load()
+                for sy in range(sil.height):
+                    for sx in range(sil.width):
+                        p = spx[sx, sy]
+                        if p[3] == 0 or (p[0], p[1], p[2]) == bg:
+                            spx[sx, sy] = (0, 0, 0, 0)
+                        else:
+                            spx[sx, sy] = (0, 0, 0, 255)
+                sil.save(os.path.join(base, "g%d_2s.png" % N))
         if N in SLICES:
             pitch, cw, ch = SLICES[N]
             k = 0

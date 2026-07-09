@@ -187,34 +187,37 @@ Function MagicUI()
 End Function
 
 ; =========================================================================
-; PANNELLO ATTACCO (HUD-3) — area 2D x 224..319, y 77..120 sotto la barra
-; magie, stessa scala/origine (MagX/MagY). A menu CHIUSO replica i 4
-; pannelli arma 20x35 di DrawAttackButton (Character.cpp:4830): riquadro
-; ciano (palette 4), finestra icona nera 16x16 a (x1+2, 95..110) con
-; l'arma in mano o il pugno (riquadro pieno se l'arma non ha AttackClass),
-; nero se il campione e' morto, retino d'ombra se disabilitato (cooldown
-; dopo l'attacco, provvisorio pendente, party addormentato). A menu APERTO
-; replica DrawLegalAttackTypes (CSBCode.cpp:8770): pannello g10 nel rect
-; del numero di opzioni, nome dell'attaccante NERO sulla banda ciano
-; (baseline 83) e fino a 3 opzioni in CIANO (baseline 93+12*i).
+; PANNELLO ATTACCO (HUD-3) — area 2D x 224..319, y 77..121, ANCORATA AL
+; PAD frecce come nel 2D (arma a y 86..120, frecce a 124: gap 4px gioco).
+; A menu CHIUSO replica i 4 pannelli arma 20x35 di DrawAttackButton
+; (Character.cpp:4830): riquadro TUTTO ciano (palette 4) con l'arma in
+; mano (o il pugno) come SAGOMA NERA — il 2D rimappa i colori con
+; ShrinkBLT + color map Byte20194: sfondo->ciano, resto->nero. Riquadro
+; pieno se l'arma non ha AttackClass, nero se il campione e' morto,
+; retino d'ombra se disabilitato (cooldown, provvisorio, party che
+; dorme). A menu APERTO replica DrawLegalAttackTypes (CSBCode.cpp:8770):
+; pannello g10 nel rect del numero di opzioni, nome dell'attaccante NERO
+; sulla banda ciano (baseline 83) e fino a 3 opzioni in CIANO (baseline
+; 93+12*i). X come la barra magie (MagX); Y con origine dedicata atkBase.
 ; =========================================================================
 
-; icona oggetto 16x16 da un atlante a scala 2 (stessa logica di DrawInvIcon
-; ma per la colonna destra a MAGSC; atlanti g<N>_2f.png pre-specchiati)
-Function DrawInvIcon2(ni, dx, dy)
+Function AtkY(y2d)
+	Return atkBase + Int((y2d - 77) * MAGSC)
+End Function
+
+; sagoma NERA dell'icona oggetto (cella 16x16 gioco) dagli atlanti
+; g<N>_2s.png (LoadAnimImage 32x32: DrawImage rispetta l'alpha)
+Function DrawAtkIcon(ni, dx, dy)
 	If ni < 0 Then Return
 	a = -1
 	For i = 0 To 6                          ; atlante: maggiore base <= ni
 		If ni >= invW612(i) Then a = i
 	Next
 	If a < 0 Then Return
-	If invAtl2(a) = 0 Then Return
+	If invAtlS(a) = 0 Then Return
 	cl = ni - invW612(a)                    ; cella nell'atlante (16 colonne)
 	If cl < 0 Or cl > 31 Then Return
-	cw = Int(16*MAGSC)
-	sx = (cl Mod 16) * cw
-	sy = (cl / 16) * cw
-	DrawImageRect invAtl2(a), dx, dy, sx, sy, cw, cw
+	DrawImage invAtlS(a), dx, dy, cl
 End Function
 
 Function DrawAttackPanel()
@@ -223,13 +226,19 @@ Function DrawAttackPanel()
 	; presto quando non c'e' un caster e lascerebbe magOX/magOY a zero
 	magOX = VIEW_W + (BAR_W - Int(96 * MAGSC)) / 2
 	magOY = BARH + 8
+	; bordo inferiore dell'area (y2d=121) a 8px dal bordo del pad frecce
+	If mvImg <> 0 Then
+		atkBase = WINH - ImageHeight(mvImg) - 14 - 8 - Int(45*MAGSC)
+	Else
+		atkBase = magOY + Int((77 - 42) * MAGSC)  ; pad non ancora caricato
+	EndIf
 
 	If atkOrd >= 1 And atkOrd <= 4 Then
 		; menu azioni aperto: g10 ritagliato al rect del numero di opzioni
 		k = atkNum
 		If k < 1 Then k = 1
 		If k > 3 Then k = 3
-		mx = MagX(amenuX1(k)) : my = MagY(amenuY1(k))
+		mx = MagX(amenuX1(k)) : my = AtkY(amenuY1(k))
 		mw = Int((amenuX2(k) - amenuX1(k) + 1) * MAGSC)
 		mh = Int((amenuY2(k) - amenuY1(k) + 1) * MAGSC)
 		If invImg10 <> 0 Then
@@ -242,11 +251,11 @@ Function DrawAttackPanel()
 		; DrawLegalAttackTypes: DrawText fg 0 su 4 / fg 4 su 0)
 		ci = atkOrd - 1
 		If ci >= 0 And ci <= 3 Then
-			DMText2 MagX(235), MagY(78), hcName$(ci), fntBlack2
+			DMText2 MagX(235), AtkY(78), hcName$(ci), fntBlack2
 		EndIf
 		For i = 0 To atkNum-1
 			If atkName$(i) <> "-" Then
-				DMText2 MagX(241), MagY(88 + 12*i), atkName$(i), fntCyan2
+				DMText2 MagX(241), AtkY(88 + 12*i), atkName$(i), fntCyan2
 			EndIf
 		Next
 		Return
@@ -260,22 +269,19 @@ Function DrawAttackPanel()
 				; il rect DISEGNATO e' quello di DrawAttackButton (20x35 a
 				; passo 22 da x=233, y 86..120 inclusivi); i rect di
 				; Buttons17952 servono solo all'hit-test in AttackUI
-				px = MagX(233 + 22*ci) : py = MagY(86)
+				px = MagX(233 + 22*ci) : py = AtkY(86)
 				pw = Int(20*MAGSC) : ph = Int(35*MAGSC)
 				If hcAtkNI(ci) = -2 Then
 					Color 0, 0, 0                   ; morto: box nero
 					Rect px, py, pw, ph, True
 				Else
-					Color palR(4), palG(4), palB(4) ; riquadro ciano
+					Color palR(4), palG(4), palB(4) ; riquadro ciano pieno
 					Rect px, py, pw, ph, True
+					; arma/pugno = sagoma nera (a y 95..110 come LOCAL_16);
+					; hcAtkNI = -1 (arma senza azioni): resta tutto ciano
 					If hcAtkNI(ci) >= 0 Then
-						ix = MagX(233 + 22*ci + 2) : iy = MagY(95)
-						iw = Int(16*MAGSC)
-						Color 0, 0, 0               ; finestra icona nera
-						Rect ix, iy, iw, iw, True
-						DrawInvIcon2(hcAtkNI(ci), ix, iy)
+						DrawAtkIcon(hcAtkNI(ci), MagX(233 + 22*ci + 2), AtkY(95))
 					EndIf
-					; hcAtkNI = -1: arma senza azioni, riquadro resta pieno
 					If hcAtkDis(ci) Then
 						If shadeImg <> 0 Then DrawImage shadeImg, px, py
 					EndIf
@@ -293,7 +299,7 @@ End Function
 Function AttackUI()
 	If gClick = 0 Or bridge = 0 Or hudValid = 0 Then Return
 	x2 = 224 + Int((MouseX() - magOX) / MAGSC)
-	y2 = 42 + Int((MouseY() - magOY) / MAGSC)
+	y2 = 77 + Int((MouseY() - atkBase) / MAGSC)
 	If x2 < 224 Or x2 > 319 Or y2 < 77 Or y2 > 121 Then Return
 	If atkOrd >= 1 And atkOrd <= 4 Then
 		For b = 0 To obtN-1

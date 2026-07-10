@@ -12,7 +12,11 @@
 ; Finestra: barra campioni in alto (HUD, tutta larghezza) + 3D a sinistra
 ; (640x480) + barra nera azioni a destra (200px). Vedi ANALISI_HUD_3D.md §1.
 Const VIEW_W = 640         ; larghezza viewport 3D
-Const BAR_W  = 200         ; larghezza barra azioni (un po' piu' larga dei tasti)
+Const BAR_W  = 240         ; larghezza barra azioni: VIEW_W+BAR_W = 880 = 320*2.75,
+                           ; la larghezza NATIVA della barra HUD a scala INVSC
+                           ; (4 box campione a passo 69 + marching-order a 281,
+                           ; come il 2D; con meno l'ultimo box finisce sotto il
+                           ; quadrato del marching-order)
 Const BARH   = 88          ; altezza barra campioni (box 2D 29px * 2.75 + margine)
 Const WINH   = 480 + BARH  ; altezza finestra totale
 Graphics3D VIEW_W+BAR_W, WINH, 0, 2

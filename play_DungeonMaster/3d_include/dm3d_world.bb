@@ -322,3 +322,71 @@ Function BuildWallHook(wx#, wy#, wz#, yaw#)
 	PositionEntity tp, 0, 0.03 - 0.40, 0.262
 	EntityColor tp, 28, 28, 32
 End Function
+
+; =========================================================================
+; OGGETTI A TERRA (dinamici: si raccolgono e si posano)
+; Il payload FLOOR/FLOORP e' gia' in brLine$: count, poi 6 righe per oggetto
+; (x / y / pos / dbType / objNI / nome). Ricostruisce DA ZERO i decal piatti:
+; texture = icona vera dell'oggetto (floorobj/ni<NI>.png, affettata dagli
+; atlanti g42..48 da gen_floorobj.py; ni<NI>_custom.png ha la precedenza).
+; pos = quadrante del tile (0=NW 1=NE 2=SE 3=SW); nel mondo 3D nord = -Z e
+; ovest = +X (mondo riflesso su X, come la camera). Oggetti che condividono
+; cella+quadrante si impilano con un piccolo rialzo (niente z-fight).
+; Il bridge manda solo il raggio ~8 celle attorno al party: piu' del buio
+; della nebbia, quindi ricostruire tutto a ogni refresh non si nota mai.
+; =========================================================================
+Function BuildFloorObjs(w, h)
+	For i = 0 To floN-1
+		If floEnt(i) <> 0 Then FreeEntity floEnt(i)
+		floEnt(i) = 0
+	Next
+	floN = 0
+	n = Int(brLine$(0))
+	k = 1
+	For i = 1 To n
+		fx = Int(brLine$(k))
+		fy = Int(brLine$(k+1))
+		fp = Int(brLine$(k+2)) And 3
+		ni = Int(brLine$(k+4))          ; k+3 = dbType, k+5 = nome (non servono)
+		k = k + 6
+		ok = (floN < FLOBJ_MAX And fx >= 0 And fx < w And fy >= 0 And fy < h And ni >= 0 And ni <= 255)
+		; le celle-MURO contengono oggetti "invisibili" (es. l'equipaggiamento
+		; dei campioni vive dentro la cella dello specchio): saltate, come nel 2D
+		If ok Then
+			If Mid$(grid$(fy), fx+1, 1) = "0" Then ok = 0
+		EndIf
+		If ok Then
+			If floTex(ni) = 0 Then
+				; asset EDITABILE: la versione ridipinta a mano vince sempre
+				cust$ = "floorobj/ni" + ni + "_custom.png"
+				If FileType(cust$) = 1 Then
+					floTex(ni) = LoadTexture(cust$, 2)              ; flag 2 = alpha
+				Else
+					floTex(ni) = LoadTexture("floorobj/ni" + ni + ".png", 2)
+				EndIf
+				; PNG top-left vs campionamento GL bottom-left (flip delle targhe)
+				If floTex(ni) <> 0 Then ScaleTexture floTex(ni), 1, -1
+			EndIf
+			; quadrante -> offset dal centro cella (nord = -Z, ovest = +X)
+			q# = CELL*0.25
+			dxo# = q : If fp = 1 Or fp = 2 Then dxo = -q
+			dzo# = q : If fp = 0 Or fp = 1 Then dzo = -q
+			; oggetti sovrapposti nello stesso quadrante: rialzo progressivo
+			key = (fy*64 + fx)*4 + fp
+			lift = 0
+			For j = 0 To floN-1
+				If floKey(j) = key Then lift = lift + 1
+			Next
+			e = CreateCube()
+			ScaleEntity e, FLOBJ_HW, 0.01, FLOBJ_HW
+			; base a ~0.19: sopra l'erba (top 0.15) e sopra la lastra delle
+			; pedane (top ~0.179), cosi' un oggetto posato su una pedana si vede
+			PositionEntity e, (w-1-fx)*CELL + dxo, 0.20 + lift*0.025, fy*CELL + dzo
+			EntityColor e, 255, 255, 255
+			If floTex(ni) <> 0 Then EntityTexture e, floTex(ni)
+			floKey(floN) = key
+			floEnt(floN) = e
+			floN = floN + 1
+		EndIf
+	Next
+End Function

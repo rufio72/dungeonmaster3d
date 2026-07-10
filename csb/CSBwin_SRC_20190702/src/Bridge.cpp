@@ -1974,6 +1974,7 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //   PLATES      ->  "OK <n>" + n righe (formato dm_plates_<N>.txt)
 //   FLOOR       ->  "OK <n>" + oggetti a terra vicini (6 righe/oggetto:
 //                   x/y/pos/dbType/objNI/nome)
+//   FLOORP      ->  come FLOOR ma header "FLOOR <n>" (refresh asincrono)
 //   DECOR       ->  "OK <n>" + decorazioni di pavimento vicine (4 righe/cella:
 //                   x/y/ordinale/graphicNumber)
 //   PEDANE      ->  "OK <n>" + pedane (attuatori con grafica di pavimento):
@@ -2159,6 +2160,13 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitFloorText);
+  }
+  else if (strcmp(line, "FLOORP") == 0)
+  {
+    // come FLOOR ma con header "FLOOR <n>": il client la riconosce anche in
+    // mezzo ai PUSH (refresh asincrono degli oggetti a terra, schema PORTS)
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "FLOOR", EmitFloorText);
   }
   else if (strcmp(line, "DECOR") == 0)
   {

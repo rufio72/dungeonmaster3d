@@ -203,6 +203,17 @@ Global invReady = 0               ; tutte le grafiche/metadati caricati
 
 Dim pliV(31)                      ; appoggio di ParseInts (numeri estratti da una riga)
 
+; --- oggetti a terra (comandi FLOOR/FLOORP del bridge) ---
+Const FLOBJ_MAX = 96              ; max decal oggetto vivi contemporaneamente
+Const FLOBJ_HW# = CELL*0.16       ; mezzo-lato del decal (~32% del tile)
+Dim floTex(255)                   ; cache texture per objNI (0 = non caricata)
+Dim floEnt(FLOBJ_MAX-1)           ; entity dei decal correnti
+Dim floKey(FLOBJ_MAX-1)           ; cella+quadrante (per impilare senza z-fight)
+Global floN = 0                   ; decal attualmente vivi
+Global floorDirty = 1             ; serve un refresh degli oggetti a terra
+Global floorPending = 0           ; richiesta FLOORP in volo
+Global floorNextMs = 0            ; prossimo refresh periodico di sicurezza
+
 ; ----------------------------------------- attende la mappa (entra nel dungeon)
 W = 0 : H = 0
 While W <= 0 Or H <= 0
@@ -518,6 +529,15 @@ If BridgeReq("PEDANE") >= 1 Then
 	Next
 EndIf
 
+; ------------------------------------------------------- oggetti a terra
+; Cibo, pergamene, armi ecc. posati sul pavimento. A differenza di erba e
+; pedane sono DINAMICI (si raccolgono/posano), quindi la costruzione vive in
+; BuildFloorObjs() (dm3d_world.bb): qui il primo giro sincrono, nel loop il
+; refresh asincrono (FLOORP, header "FLOOR <n>" riconosciuto nel drenaggio).
+; Texture = icone vere degli oggetti affettate da gen_floorobj.py in
+; floorobj/ni<NI>.png (ni<NI>_custom.png ha la precedenza, mai sovrascritto).
+If BridgeReq("FLOOR") >= 1 Then BuildFloorObjs(W, H)
+
 ; ---------------------------------------------------- ritratti dei campioni
 ; Texture dei 24 campioni (immagini rifatte: portraits/00.png .. 23.png).
 ; ScaleTexture .,1,-1 corregge il flip verticale (origine immagine top-left
@@ -750,7 +770,10 @@ torchFlaring = 0    ; 0 = baseline, 1 = sta fiammeggiando
 While Not KeyHit(1)
 	; riconnessione (se CSBwin e' stato chiuso/riaperto): riattiva anche il push
 	If bridge = 0 Then
-		If BridgeConnect() <> 0 Then BridgeReq("SUB")
+		If BridgeConnect() <> 0 Then
+			BridgeReq("SUB")
+			floorPending = 0 : floorDirty = 1   ; richiesta in volo persa col socket
+		EndIf
 	EndIf
 
 	; drena TUTTO cio' che il server ha inviato (PUSH di stato, "OK 0" dei CMD)
@@ -761,9 +784,10 @@ While Not KeyHit(1)
 			CloseTCPStream bridge : bridge = 0     ; server sparito: riproveremo
 		Else
 			pn = BridgeRead(hdr$)
-			If Left$(hdr$, 3) = "ERR" Then sheetPending = 0   ; SHEET rifiutato (o altro ERR)
+			If Left$(hdr$, 3) = "ERR" Then sheetPending = 0 : floorPending = 0   ; richiesta rifiutata
 			If Left$(hdr$, 5) = "SHEET" And pn >= 105 Then ParseSheet()
 			If Left$(hdr$, 5) = "PORTS" And pn >= 1 Then ParsePorts()
+			If Left$(hdr$, 5) = "FLOOR" And pn >= 1 Then BuildFloorObjs(W, H) : floorPending = 0
 			If Left$(hdr$, 4) = "PUSH" And pn >= 6 Then
 				nx = Int(brLine$(0))
 				ny = Int(brLine$(1))
@@ -774,6 +798,7 @@ While Not KeyHit(1)
 				If nx >= 0 And nx < W And ny >= 0 And ny < H Then
 					px = nx : py = ny : pf = nf
 				EndIf
+				If mvd Then floorDirty = 1      ; nuova cella: oggetti a terra da rinfrescare
 
 				; sezione mostri: la saltiamo (3 righe per mostro), poi le porte.
 				sk = 4
@@ -851,6 +876,8 @@ While Not KeyHit(1)
 						; oggetto in mano cambiato (presa/posa): rinfresca subito
 						; gli slot (il push non porta i 30 slot, serve la SHEET)
 						If pcSel > 0 And newHandNI <> hcHandNI Then needSheet = 1
+						; presa/posa: puo' essere sparito/apparso un oggetto a terra
+						If newHandNI <> hcHandNI Then floorDirty = 1
 						hcHandNI = newHandNI
 						; stato spell del caster (5 righe in coda, barra magie)
 						If sk + 10 <= pn - 1 Then
@@ -904,6 +931,14 @@ While Not KeyHit(1)
 	If pcSel > 0 And needSheet And sheetPending = 0 And bridge <> 0 Then
 		WriteLine bridge, "SHEET"
 		sheetPending = 1 : needSheet = 0
+	EndIf
+
+	; oggetti a terra: refresh su movimento/presa-posa + giro periodico di
+	; sicurezza (mostri che lasciano loot, eventi del 2D non visti dal push)
+	If MilliSecs() >= floorNextMs Then floorDirty = 1 : floorNextMs = MilliSecs() + 1500
+	If floorDirty And floorPending = 0 And bridge <> 0 Then
+		WriteLine bridge, "FLOORP"
+		floorPending = 1 : floorDirty = 0
 	EndIf
 
 	; animazione porte OGNI frame (i PUSH arrivano ~16/s: qui si interpola a 60):

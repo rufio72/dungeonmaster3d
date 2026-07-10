@@ -35,7 +35,7 @@ End Function
 ; dentro brLine$. Ritorna n; -1 se l'header e' un ERR o non riconosciuto.
 Function BridgeRead(hdr$)
 	brN = -1
-	If Left$(hdr$, 2) <> "OK" And Left$(hdr$, 4) <> "PUSH" And Left$(hdr$, 5) <> "SHEET" And Left$(hdr$, 5) <> "PORTS" Then Return -1
+	If Left$(hdr$, 2) <> "OK" And Left$(hdr$, 4) <> "PUSH" And Left$(hdr$, 5) <> "SHEET" And Left$(hdr$, 5) <> "PORTS" And Left$(hdr$, 5) <> "FLOOR" Then Return -1
 	sp = Instr(hdr$, " ")
 	If sp = 0 Then Return -1
 	n = Int(Mid$(hdr$, sp+1))

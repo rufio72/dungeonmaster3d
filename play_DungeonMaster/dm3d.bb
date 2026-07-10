@@ -156,6 +156,7 @@ Global atkBase = 0                ; origine Y area attacco (ancorata al pad)
 Global atkOX = 0                  ; origine X dei pannelli arma (= bordo sx pad)
 Dim marchX(3), marchY(3), marchW(3), marchH(3)    ; celle normalizzate (px 2D)
 Global marchN = 0, marchTW = 0, marchTH = 0       ; n. celle e ingombro totale
+Global moDrag = -1                ; drag marching-order: cella presa (-1 = no)
 Dim palR(15), palG(15), palB(15)  ; palette ST (invgfx/palette.txt)
 Global fw30X = 0, fw30Y = 0       ; destinazioni label (wRectPos950/958/966)
 Global fw31X = 0, fw31Y = 0
@@ -1051,6 +1052,10 @@ While Not KeyHit(1)
 	gClick = MouseHit(1)
 	gClickR = MouseHit(2)
 	cmx = MouseX() : cmy = MouseY()
+
+	; drag&drop del marching-order (PRIMA dei box campione: se il click parte
+	; da una cella del quadrato viene consumato qui e gClick azzerato)
+	MarchUI(pf)
 
 	; click (sinistro O destro) su un box campione della barra in alto:
 	; apre/chiude il suo inventario (codice coda 7+idx -> ShowHideInventory;

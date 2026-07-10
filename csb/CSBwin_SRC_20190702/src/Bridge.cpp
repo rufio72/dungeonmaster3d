@@ -1470,6 +1470,42 @@ static int Bridge_InjectRRC(int code)
   return 0;
 }
 
+// ---- comando "MORDER <a> <b>": riordino party (marching order) --------------
+// Sposta il campione dalla cella-schermo a alla cella b del quadrato in alto a
+// destra (celle 0..3 RELATIVE al facing, come le disegna il 2D). Replica il
+// ramo "secondo click" di TAG0025a6 (CSBCode.cpp) SENZA passare dal cursore:
+// il percorso UI vero (codici 125..128) tiene un drag aperto (Word23144) che
+// il VBL annulla appena il mouse REALE sta fuori dall'area (CSBCode.cpp:948)
+// -> inutilizzabile da remoto. Qui sono solo assegnazioni di campo +
+// DrawCharacterState (funzioni normali, non RESTARTABLE), identiche al 2D.
+static int Bridge_MarchOrder(int a, int b)
+{
+  if (a < 0 || a > 3 || b < 0 || b > 3 || a == b) return 0;
+  if (d.Word23144 != 0) return 0;                  // drag reale in corso nel 2D
+  if (d.PotentialCharacterOrdinal != 0) return 0;  // scelta campione in corso
+  if (d.PartySleeping) return 0;
+  i32 ca = CharacterAtPosition((d.partyFacing + a) & 3);
+  if (ca == -1) return 0;                          // cella sorgente vuota
+  i32 cb = CharacterAtPosition((d.partyFacing + b) & 3);
+  d.CH16482[ca].facing = (i8)d.partyFacing;
+  if (cb >= 0)
+  {
+    // cella occupata: l'altro campione prende il posto del primo (swap)
+    d.CH16482[cb].charPosition = (ui8)((a + d.partyFacing) & 3);
+    d.CH16482[cb].charFlags |= CHARFLAG_positionChanged;
+    DrawCharacterState(cb);
+  }
+  else
+  {
+    // cella libera: pulisci il quadratino della cella sorgente (come il 2D)
+    FillRectangle(d.LogicalScreenBase, &d.wRectPos1454[a], 0, 160);
+  }
+  d.CH16482[ca].charPosition = (ui8)((b + d.partyFacing) & 3);
+  d.CH16482[ca].charFlags |= CHARFLAG_positionChanged;
+  DrawCharacterState(ca);
+  return 1;
+}
+
 // ---- comando "GRAB <slot 0..29>": drag-and-drop inventario -------------------
 // Prende/posa l'oggetto nello slot come farebbe un click fisico sul backpack:
 // inietta un click SINISTRO alla coordinata dello slot via OnMouseClick, che
@@ -1985,6 +2021,8 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //   CHAMP <ord> ->  "OK 29" + scheda campione: nome/titolo/sesso/hp/stamina/
 //                   mana/7 attributi/16 skill ("ERR nochamp" se non esiste)
 //   CMD <1..6>  ->  "OK 0"   (inietta il movimento nella coda mouse)
+//   MORDER a b  ->  "OK 0"   riordino party: campione dalla cella-schermo a
+//                   alla cella b del marching-order (0..3 rel. al facing)
 //   SUB         ->  "OK 0"; da qui in poi il server invia spontaneamente
 //                   "PUSH <n>" + n righe (formato STATE) a ogni cambiamento
 //   errori      ->  "ERR nolevel" (titolo/menu), "ERR badcmd", "ERR unknown"
@@ -2253,6 +2291,16 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
     int code = atoi(line + 4);
     if (!bridgeLevelReady || !Bridge_InjectRRC(code))
       BridgeSrv_Queue(c, "ERR badrrc\n", 11);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "MORDER ", 7) == 0)
+  {
+    // riordino party: "MORDER <cella-da> <cella-a>" (celle schermo 0..3)
+    int a = -1, b = -1;
+    sscanf(line + 7, "%d %d", &a, &b);
+    if (!bridgeLevelReady || !Bridge_MarchOrder(a, b))
+      BridgeSrv_Queue(c, "ERR badmorder\n", 14);
     else
       BridgeSrv_Queue(c, "OK 0\n", 5);
   }

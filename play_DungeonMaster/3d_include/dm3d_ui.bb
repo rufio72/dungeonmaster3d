@@ -467,3 +467,71 @@ Function DrawHUD(pfc)
 		EndIf
 	Next
 End Function
+
+; =========================================================================
+; DRAG&DROP MARCHING ORDER (quadrato in alto a destra)
+; Mouse GIU' su una cella occupata = prendi il campione (la sua figurina
+; segue il cursore), rilascio su un'altra cella = riordino. Il riordino VERO
+; lo fa il motore 2D (comando MORDER del bridge, celle-schermo 0..3 relative
+; al facing: stessa convenzione con cui DrawHUD le disegna); il nuovo assetto
+; torna dal push (hcPos) e il quadrato si ridisegna da solo.
+; =========================================================================
+; cella del quadrato sotto il mouse (0..3) o -1
+Function MarchCellAt(mx, my)
+	If marchN < 4 Then Return -1
+	mox = VIEW_W + BAR_W - Int(marchTW*INVSC) - 3
+	moy = 3
+	For c = 0 To 3
+		x1 = mox + Int(marchX(c)*INVSC)
+		y1 = moy + Int(marchY(c)*INVSC)
+		If mx >= x1 And mx < x1 + Int(marchW(c)*INVSC) And my >= y1 And my < y1 + Int(marchH(c)*INVSC) Then
+			Return c
+		EndIf
+	Next
+	Return -1
+End Function
+
+; campione (0..3) che occupa la cella-schermo c, o -1
+Function MarchChampAt(c, pfc)
+	For i = 0 To 3
+		If hcAct(i) Then
+			If ((hcPos(i) + 4 - pfc) And 3) = c Then Return i
+		EndIf
+	Next
+	Return -1
+End Function
+
+Function MarchUI(pfc)
+	If marchN < 4 Or invReady = 0 Or hudValid = 0 Then Return
+	If pcSel > 0 Then moDrag = -1 : Return      ; inventario aperto: niente drag
+	mx = MouseX() : my = MouseY()
+	If gClick > 0 And moDrag < 0 Then
+		c = MarchCellAt(mx, my)
+		If c >= 0 Then
+			If MarchChampAt(c, pfc) >= 0 Then
+				moDrag = c
+				gClick = 0                      ; click consumato dal drag
+			EndIf
+		EndIf
+	EndIf
+	If moDrag >= 0 Then
+		; figurina appesa al cursore (cella colorata + omino, come nel quadrato)
+		i = MarchChampAt(moDrag, pfc)
+		If i >= 0 Then
+			cw = Int(marchW(moDrag)*INVSC) : ch = Int(marchH(moDrag)*INVSC)
+			cix = hcCol(i)
+			If cix >= 0 And cix <= 15 Then Color palR(cix), palG(cix), palB(cix) Else Color 0, 218, 0
+			Rect mx - cw/2, my - ch/2, cw, ch, True
+			ac = (hcFacing(i) + 4 - pfc) And 3
+			If invArrow(ac) <> 0 Then DrawImage invArrow(ac), mx - cw/2, my - ch/2
+		EndIf
+		If MouseDown(1) = 0 Then
+			; rilascio: su un'ALTRA cella -> riordina; altrove -> annulla
+			c = MarchCellAt(mx, my)
+			If c >= 0 And c <> moDrag And bridge <> 0 Then
+				WriteLine bridge, "MORDER " + moDrag + " " + c
+			EndIf
+			moDrag = -1
+		EndIf
+	EndIf
+End Function

@@ -443,7 +443,17 @@ Function DrawHUD(pfc)
 				; 3 barre vitali: geometria REALE del 2D (misurata pixel per
 				; pixel: x = 46+b*7, larghe 4, y 2..27, dal basso, senza
 				; canale di fondo — la parte vuota resta il grigio del box);
-				; STAMINA e' gia' proporzionale (cur/max), niente /10 qui
+				; STAMINA e' gia' proporzionale (cur/max), niente /10 qui.
+				; COLORE = colore-campione dello slot (Byte1386 -> hcCol:
+				; slot 0 verde 7, 1 giallo 11, 2 rosso 8, 3 blu 14), come
+				; le disegna il 2D nei bitplane (DrawLifeBars/TAG014a60) e
+				; come le celle del marching-order: NON sono sempre verdi
+				cix = hcCol(i)
+				If cix >= 0 And cix <= 15 Then
+					Color palR(cix), palG(cix), palB(cix)
+				Else
+					Color 0, 218, 0
+				EndIf
 				For b = 0 To 2
 					If b = 0 Then cv = hcHP(i)   : mv = hcMaxHP(i)
 					If b = 1 Then cv = hcStam(i) : mv = hcMaxStam(i)
@@ -454,7 +464,6 @@ Function DrawHUD(pfc)
 						If hb > 25 Then hb = 25
 					EndIf
 					If hb > 0 Then
-						Color 0, 218, 0
 						Rect bx + Int((46 + b*7)*INVSC), HBOXY + Int((27-hb)*INVSC), Int(4*INVSC), Int(hb*INVSC), True
 					EndIf
 				Next

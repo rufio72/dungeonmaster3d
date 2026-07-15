@@ -782,6 +782,19 @@ If BridgeReq("WALLDEC") >= 1 Then
 				If dir = 3 Then BuildWallRing(cxw, hky, czw + hnear, 180)
 				Goto wdecNext
 			EndIf
+			; la GRATA DI SCOLO (tipo 34) e' in vera geometria 3D, alla BASE
+			; del muro come nel 2D (BuildWallGrate, dm3d_world.bb).
+			If wdt = 34 Then
+				cxw# = (W-1-fx)*CELL
+				czw# = fy*CELL
+				hky# = 0.1                     ; quota del calpestio (base grata)
+				hnear# = CELL/2.0 - 0.02
+				If dir = 0 Then BuildWallGrate(cxw + hnear, hky, czw, 90)
+				If dir = 1 Then BuildWallGrate(cxw - hnear, hky, czw, -90)
+				If dir = 2 Then BuildWallGrate(cxw, hky, czw - hnear, 0)
+				If dir = 3 Then BuildWallGrate(cxw, hky, czw + hnear, 180)
+				Goto wdecNext
+			EndIf
 			If wdecTex(wdt) = 0 Then
 				; asset EDITABILE: la versione ridipinta a mano vince sempre
 				cust$ = "walldec/t" + wdt + "_custom.png"
@@ -808,9 +821,13 @@ If BridgeReq("WALLDEC") >= 1 Then
 				If dir = 1 Then ox = -near : sx = WDEC_T   ; muro a -X (griglia est)
 				If dir = 2 Then oz = -near : sz = WDEC_T   ; muro a -Z (griglia nord)
 				If dir = 3 Then oz = +near : sz = WDEC_T   ; muro a +Z (griglia sud)
+				; le decorazioni "di base" (es. pianta, tipo 33) poggiano sul
+				; pavimento come nel 2D; le altre stanno in mezzeria parete.
+				wdy# = EYE
+				If wdt = 33 Then wdy = 0.1 + dh
 				wdec = CreateCube()
 				ScaleEntity wdec, sx, dh, sz
-				PositionEntity wdec, cxw + ox, EYE, czw + oz
+				PositionEntity wdec, cxw + ox, wdy, czw + oz
 				EntityColor wdec, 255, 255, 255
 				EntityTexture wdec, wdecTex(wdt)
 			EndIf

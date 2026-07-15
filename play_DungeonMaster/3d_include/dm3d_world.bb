@@ -389,6 +389,52 @@ Function BuildWallRing(wx#, wy#, wz#, yaw#)
 End Function
 
 ; =========================================================================
+; GRATA DI SCOLO IN GEOMETRIA 3D (decorazione murale DM tipo 34)
+; Nel 2D e' la grafica g190: grata di legno per lo scolo dell'acqua alla
+; BASE del muro (appoggiata al pavimento, non a mezza parete): cornice e
+; stecche verticali di legno con aperture scure, architrave di pietra sopra.
+; Stesso schema di gancio/anello: pivot sulla superficie del muro con +Z
+; locale che punta FUORI, figli in coordinate LOCALI. wy = quota del
+; CALPESTIO (base della grata), non la mezzeria.
+; =========================================================================
+Function BuildWallGrate(wx#, wy#, wz#, yaw#)
+	piv = CreatePivot()
+	PositionEntity piv, wx, wy, wz
+	RotateEntity piv, 0, yaw, 0
+
+	; fondo NERO (lo scarico dietro le stecche)
+	bg = CreateCube(piv)
+	ScaleEntity bg, 0.36, 0.27, 0.008
+	PositionEntity bg, 0, 0.27, 0.004
+	EntityColor bg, 8, 8, 8
+
+	; architrave di pietra sopra la grata
+	li = CreateCube(piv)
+	ScaleEntity li, 0.40, 0.035, 0.035
+	PositionEntity li, 0, 0.575, 0.020
+	EntityColor li, 120, 120, 122
+	If walltex <> 0 Then EntityTexture li, walltex, 0, 0
+
+	; traversa di legno in alto
+	tr = CreateCube(piv)
+	ScaleEntity tr, 0.36, 0.045, 0.035
+	PositionEntity tr, 0, 0.495, 0.028
+	EntityColor tr, 150, 110, 70
+	If woodtex <> 0 Then EntityTexture tr, woodtex
+
+	; montanti laterali + 3 stecche centrali (4 aperture, come la grafica)
+	For k = -2 To 2
+		sx# = 0.042 : sz# = 0.030
+		If Abs(k) = 2 Then sx = 0.050 : sz = 0.035   ; i due montanti esterni
+		sl = CreateCube(piv)
+		ScaleEntity sl, sx, 0.225, sz
+		PositionEntity sl, k*0.155, 0.225, 0.026
+		EntityColor sl, 150, 110, 70
+		If woodtex <> 0 Then EntityTexture sl, woodtex
+	Next
+End Function
+
+; =========================================================================
 ; OGGETTI A TERRA (dinamici: si raccolgono e si posano)
 ; Il payload FLOOR/FLOORP e' gia' in brLine$: count, poi 6 righe per oggetto
 ; (x / y / pos / dbType / objNI / nome). Ricostruisce DA ZERO i decal piatti:

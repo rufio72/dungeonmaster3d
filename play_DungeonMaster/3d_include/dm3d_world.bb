@@ -348,13 +348,11 @@ Function BuildWallRing(wx#, wy#, wz#, yaw#)
 	EntityColor pl, 74, 76, 82
 	EntityShininess pl, 0.35
 
-	For i = 0 To 1                                 ; 2 chiodi in alto
-		na = CreateSphere(8, piv)
-		ScaleEntity na, 0.024, 0.024, 0.016
-		PositionEntity na, (i*2-1)*0.028, 0.315, 0.038
-		EntityColor na, 150, 150, 156
-		EntityShininess na, 0.4
-	Next
+	na = CreateSphere(8, piv)                      ; un chiodo in alto, centrato
+	ScaleEntity na, 0.024, 0.024, 0.016
+	PositionEntity na, 0, 0.305, 0.038
+	EntityColor na, 150, 150, 156
+	EntityShininess na, 0.4
 
 	pb2 = CreateCube(piv)                          ; ponte SOPRA il tubo
 	ScaleEntity pb2, 0.05, 0.018, 0.062

@@ -362,15 +362,15 @@ Function BuildWallRing(wx#, wy#, wz#, yaw#)
 	EntityColor pb2, 74, 76, 82
 	EntityShininess pb2, 0.35
 
-	pf2 = CreateCube(piv)                          ; linguetta DAVANTI all'anello
-	ScaleEntity pf2, 0.05, 0.055, 0.012
-	PositionEntity pf2, 0, 0.19, 0.146
+	pf2 = CreateCube(piv)                          ; linguetta DAVANTI all'anello:
+	ScaleEntity pf2, 0.05, 0.095, 0.012           ; LUNGA, scende ben sotto il tubo
+	PositionEntity pf2, 0, 0.15, 0.146
 	EntityColor pf2, 74, 76, 82
 	EntityShininess pf2, 0.35
 
-	rv = CreateSphere(8, piv)                      ; ribattino sulla linguetta
-	ScaleEntity rv, 0.022, 0.022, 0.014
-	PositionEntity rv, 0, 0.175, 0.16
+	rv = CreateSphere(8, piv)                      ; ribattino in FONDO alla linguetta
+	ScaleEntity rv, 0.022, 0.022, 0.014           ; (sul metallo, non sul cerchio)
+	PositionEntity rv, 0, 0.09, 0.16
 	EntityColor rv, 150, 150, 156
 	EntityShininess rv, 0.4
 

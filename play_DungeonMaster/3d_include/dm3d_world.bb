@@ -338,29 +338,41 @@ Function BuildWallRing(wx#, wy#, wz#, yaw#)
 	PositionEntity piv, wx, wy, wz
 	RotateEntity piv, 0, yaw, 0
 
-	; FIBBIA: piastra verticale di ferro scuro inchiodata al muro (in alto)
-	pl = CreateCube(piv)
-	ScaleEntity pl, 0.085, 0.115, 0.022
-	PositionEntity pl, 0, 0.24, 0.024
+	; FIBBIA a fettuccia: passa SOPRA il tubo dell'anello e ricade davanti
+	; (l'anello sta infilato nell'asola, altrimenti non lo reggerebbe).
+	; Tre pezzi: piastra inchiodata al muro, ponte sopra il tubo, linguetta
+	; davanti all'anello chiusa da un ribattino.
+	pl = CreateCube(piv)                           ; piastra sul muro
+	ScaleEntity pl, 0.05, 0.07, 0.016
+	PositionEntity pl, 0, 0.27, 0.018
 	EntityColor pl, 74, 76, 82
 	EntityShininess pl, 0.35
 
-	; 2 chiodi (teste tonde, sopra e sotto il perno)
-	For i = 0 To 1
+	For i = 0 To 1                                 ; 2 chiodi in alto
 		na = CreateSphere(8, piv)
-		ScaleEntity na, 0.026, 0.026, 0.018
-		PositionEntity na, 0, 0.24 + (i*2-1)*0.078, 0.050
+		ScaleEntity na, 0.024, 0.024, 0.016
+		PositionEntity na, (i*2-1)*0.028, 0.315, 0.038
 		EntityColor na, 150, 150, 156
 		EntityShininess na, 0.4
 	Next
 
-	; PERNO: spinotto che esce dalla fibbia e regge l'anello
-	pr = CreateCylinder(10, True, piv)
-	ScaleEntity pr, 0.028, 0.055, 0.028
-	RotateEntity pr, 90, 0, 0                      ; asse lungo +Z locale
-	PositionEntity pr, 0, 0.185, 0.050
-	EntityColor pr, 46, 47, 52
-	EntityShininess pr, 0.3
+	pb2 = CreateCube(piv)                          ; ponte SOPRA il tubo
+	ScaleEntity pb2, 0.05, 0.018, 0.062
+	PositionEntity pb2, 0, 0.242, 0.078
+	EntityColor pb2, 74, 76, 82
+	EntityShininess pb2, 0.35
+
+	pf2 = CreateCube(piv)                          ; linguetta DAVANTI all'anello
+	ScaleEntity pf2, 0.05, 0.055, 0.012
+	PositionEntity pf2, 0, 0.19, 0.146
+	EntityColor pf2, 74, 76, 82
+	EntityShininess pf2, 0.35
+
+	rv = CreateSphere(8, piv)                      ; ribattino sulla linguetta
+	ScaleEntity rv, 0.022, 0.022, 0.014
+	PositionEntity rv, 0, 0.175, 0.16
+	EntityColor rv, 150, 150, 156
+	EntityShininess rv, 0.4
 
 	; ANELLO di ferro scuro appeso al perno
 	rr# = 0.21                                     ; raggio dell'anello

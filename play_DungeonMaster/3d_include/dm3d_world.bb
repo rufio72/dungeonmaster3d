@@ -324,6 +324,61 @@ Function BuildWallHook(wx#, wy#, wz#, yaw#)
 End Function
 
 ; =========================================================================
+; ANELLO DA MURO IN GEOMETRIA 3D (decorazione murale DM tipo 6)
+; Nel 2D e' la grafica g134: una FIBBIA di metallo inchiodata al muro che
+; regge un grosso anello di ferro scuro appeso a un perno. Stesso schema del
+; gancio: pivot sulla superficie del muro con +Z locale che punta FUORI dal
+; muro, figli in coordinate LOCALI. L'anello e' un toro approssimato con 12
+; segmenti-cilindro su un sotto-pivot, appena inclinato (la base sfiora il
+; muro, la cima e' fuori sul perno).
+;   wx,wy,wz = punto sulla superficie del muro; yaw = orientamento faccia
+; =========================================================================
+Function BuildWallRing(wx#, wy#, wz#, yaw#)
+	piv = CreatePivot()
+	PositionEntity piv, wx, wy, wz
+	RotateEntity piv, 0, yaw, 0
+
+	; FIBBIA: piastra verticale di ferro scuro inchiodata al muro (in alto)
+	pl = CreateCube(piv)
+	ScaleEntity pl, 0.085, 0.115, 0.022
+	PositionEntity pl, 0, 0.24, 0.024
+	EntityColor pl, 74, 76, 82
+	EntityShininess pl, 0.35
+
+	; 2 chiodi (teste tonde, sopra e sotto il perno)
+	For i = 0 To 1
+		na = CreateSphere(8, piv)
+		ScaleEntity na, 0.026, 0.026, 0.018
+		PositionEntity na, 0, 0.24 + (i*2-1)*0.078, 0.050
+		EntityColor na, 150, 150, 156
+		EntityShininess na, 0.4
+	Next
+
+	; PERNO: spinotto che esce dalla fibbia e regge l'anello
+	pr = CreateCylinder(10, True, piv)
+	ScaleEntity pr, 0.028, 0.055, 0.028
+	RotateEntity pr, 90, 0, 0                      ; asse lungo +Z locale
+	PositionEntity pr, 0, 0.185, 0.050
+	EntityColor pr, 46, 47, 52
+	EntityShininess pr, 0.3
+
+	; ANELLO di ferro scuro appeso al perno
+	rr# = 0.21                                     ; raggio dell'anello
+	rp = CreatePivot(piv)
+	PositionEntity rp, 0, 0.185 - rr, 0.068
+	RotateEntity rp, 7, 0, 0                       ; cima in fuori, base verso il muro
+	For k = 0 To 11
+		a# = k * 30.0
+		sg = CreateCylinder(8, True, rp)
+		ScaleEntity sg, 0.036, rr*0.34, 0.036      ; mezzo-lato > rr*Sin(15): niente buchi
+		PositionEntity sg, rr*Cos(a), rr*Sin(a), 0
+		RotateEntity sg, 0, 0, a                   ; asse Y del cilindro = tangente
+		EntityColor sg, 40, 41, 46
+		EntityShininess sg, 0.25
+	Next
+End Function
+
+; =========================================================================
 ; OGGETTI A TERRA (dinamici: si raccolgono e si posano)
 ; Il payload FLOOR/FLOORP e' gia' in brLine$: count, poi 6 righe per oggetto
 ; (x / y / pos / dbType / objNI / nome). Ricostruisce DA ZERO i decal piatti:
@@ -388,5 +443,109 @@ Function BuildFloorObjs(w, h)
 			floEnt(floN) = e
 			floN = floN + 1
 		EndIf
+	Next
+End Function
+
+; ------------------------------------------------------------------- scale 3D
+; Scala in GEOMETRIA dentro la cella: gradini a tutta larghezza che scendono
+; (up=0) sotto il pavimento o salgono (up=1) verso il soffitto, sviluppandosi
+; lungo (dx,dz) = direzione unitaria mondo VIA dall'ingresso. La cella arriva
+; qui SENZA la piastrella bucata dal vano (pavimento se discesa, soffitto se
+; salita: il loop di costruzione la salta). Il vano sfuma nel buio: gradini
+; via via piu' scuri + pannelli di pietra scura che chiudono fianchi e fondo,
+; cosi' non si vede mai il void. cx,cz = centro cella. STAIR_N/STAIR_DROP nel main.
+Function BuildStairs(cx#, cz#, dx#, dz#, up)
+	sd# = CELL / Float(STAIR_N)          ; pedata (profondita' di un gradino)
+	sh# = STAIR_DROP / Float(STAIR_N)    ; alzata di un gradino
+	base# = 0.1                          ; quota del calpestio (top piastrella)
+
+	For i = 0 To STAIR_N-1
+		u# = -CELL/2.0 + (i+0.5)*sd      ; centro del gradino lungo lo sviluppo
+		If up = 1 Then
+			top# = base + (i+1)*sh
+			bot# = 0.0
+		Else
+			top# = base - (i+1)*sh
+			bot# = base - STAIR_DROP - 0.5
+		EndIf
+		st = CreateCube()
+		If dx <> 0 Then
+			ScaleEntity st, sd/2.0, (top-bot)/2.0, CELL/2.0
+		Else
+			ScaleEntity st, CELL/2.0, (top-bot)/2.0, sd/2.0
+		EndIf
+		PositionEntity st, cx + dx*u, (top+bot)/2.0, cz + dz*u
+		; scendendo (o salendo) nel vano la pietra sfuma verso il buio
+		lum = 235 - i*28
+		EntityColor st, lum, lum, lum
+		If floortex <> 0 Then
+			EntityTexture st, floortex, 0, 0                        ; diffuse slot 0
+			If floortexN <> 0 Then EntityTexture st, floortexN, 0, 1 ; normal map slot 1
+		EndIf
+	Next
+
+	; pannelli di chiusura del vano, OLTRE la quota della cella: sotto il
+	; pavimento per la discesa, sopra il soffitto per la salita. Due fianchi
+	; (paralleli allo sviluppo) + un fondo sul lato opposto all'ingresso.
+	If up = 1 Then
+		pb# = CELL : pt# = CELL + STAIR_DROP + 0.5
+	Else
+		pb# = base - STAIR_DROP - 0.5 : pt# = base
+	EndIf
+	For s = -1 To 1 Step 2
+		fl = CreateCube()
+		If dx <> 0 Then
+			ScaleEntity fl, CELL/2.0, (pt-pb)/2.0, 0.15
+			PositionEntity fl, cx, (pt+pb)/2.0, cz + s*(CELL/2.0)
+		Else
+			ScaleEntity fl, 0.15, (pt-pb)/2.0, CELL/2.0
+			PositionEntity fl, cx + s*(CELL/2.0), (pt+pb)/2.0, cz
+		EndIf
+		EntityColor fl, 80, 80, 80
+		If walltex  <> 0 Then EntityTexture fl, walltex,  0, 0
+		If walltexN <> 0 Then EntityTexture fl, walltexN, 0, 1
+	Next
+	bk = CreateCube()
+	If dx <> 0 Then
+		ScaleEntity bk, 0.15, (pt-pb)/2.0, CELL/2.0
+		PositionEntity bk, cx + dx*(CELL/2.0), (pt+pb)/2.0, cz
+	Else
+		ScaleEntity bk, CELL/2.0, (pt-pb)/2.0, 0.15
+		PositionEntity bk, cx, (pt+pb)/2.0, cz + dz*(CELL/2.0)
+	EndIf
+	EntityColor bk, 80, 80, 80
+	If walltex  <> 0 Then EntityTexture bk, walltex,  0, 0
+	If walltexN <> 0 Then EntityTexture bk, walltexN, 0, 1
+
+	; POGGIAMANO: corrimano in pietra sui due fianchi, inclinati come la
+	; rampa, con un paletto di sostegno per gradino. AlignToVector allinea
+	; l'asse X locale della trave allo sviluppo (niente giochi di segni).
+	If up = 1 Then vy# = STAIR_DROP Else vy# = -STAIR_DROP
+	railh# = 1.05                        ; altezza corrimano sopra il naso dei gradini
+	rl# = Sqr(CELL*CELL + STAIR_DROP*STAIR_DROP)/2.0 + 0.1   ; mezza lunghezza trave
+	For s = -1 To 1 Step 2
+		If dx <> 0 Then
+			lox# = 0 : loz# = s*(CELL/2.0 - 0.24)
+		Else
+			lox = s*(CELL/2.0 - 0.24) : loz = 0
+		EndIf
+		; manici in LEGNO (stesso legno delle ante delle porte)
+		hr = CreateCube()
+		ScaleEntity hr, rl, 0.055, 0.075
+		PositionEntity hr, cx + lox, base + vy/2.0 + railh, cz + loz
+		AlignToVector hr, dx*CELL, vy, dz*CELL, 1
+		EntityColor hr, 150, 110, 70
+		If woodtex <> 0 Then EntityTexture hr, woodtex
+
+		For i = 0 To STAIR_N-1
+			u# = -CELL/2.0 + (i+0.5)*sd
+			If up = 1 Then ty# = base + (i+1)*sh Else ty = base - (i+1)*sh
+			ry# = base + railh + vy*(u + CELL/2.0)/CELL   ; quota del corrimano sopra u
+			po = CreateCylinder(8, True)
+			ScaleEntity po, 0.042, (ry-ty)/2.0, 0.042
+			PositionEntity po, cx + dx*u + lox, (ry+ty)/2.0, cz + dz*u + loz
+			EntityColor po, 135, 98, 62
+			If woodtex <> 0 Then EntityTexture po, woodtex
+		Next
 	Next
 End Function

@@ -24,6 +24,9 @@
 
 #include <cstdio>
 #include <sys/stat.h>
+#include <dirent.h>
+
+#include "SaveJson.h"
 
 // MinGW's mkdir takes only a path (no POSIX mode argument).
 #ifdef _WIN32
@@ -1077,6 +1080,32 @@ static void EmitPedaneText(FILE *f)
     fprintf(f, "%d\n%d\n%d\n", xA[i], yA[i], ordA[i]);
 }
 
+// ---- scale (statico, per livello) ------------------------------------------
+// La MAPPA dice solo DOVE sono le scale (tipo cella 3); direzione e asse stanno
+// nei bit bassi della CELLFLAG (CSBTypes.h): bit 2 = salita, bit 3 = asse N/S.
+// Formato: count, poi 4 righe/scala: x / y / up(0=giu' 1=su) / ns(0=E-O 1=N-S)
+static void EmitStairsText(FILE *f)
+{
+  int xA[128], yA[128], upA[128], nsA[128];
+  int cnt = 0;
+
+  for (int y = 0; y < d.height && cnt < 128; y++)
+    for (int x = 0; x < d.width && cnt < 128; x++)
+    {
+      int cf = (int)GetCellFlags(x, y);
+      if (((cf >> 5) & 7) != roomSTAIRS) continue;
+      xA[cnt]  = x;
+      yA[cnt]  = y;
+      upA[cnt] = (cf >> 2) & 1;
+      nsA[cnt] = (cf >> 3) & 1;
+      cnt++;
+    }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n", xA[i], yA[i], upA[i], nsA[i]);
+}
+
 // ---- decorazioni murali random (statico, per livello) ---------------------
 // Il 2D decora i muri di pietra con ornamenti PROCEDURALI per-faccia: i bit
 // 0-3 dei cellflags della cella-muro abilitano la decorazione su UNA faccia
@@ -2015,6 +2044,8 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //                   x/y/ordinale/graphicNumber)
 //   PEDANE      ->  "OK <n>" + pedane (attuatori con grafica di pavimento):
 //                   3 righe/pedana: x/y/ordinale
+//   STAIRS      ->  "OK <n>" + scale del livello (4 righe/scala:
+//                   x/y/up/ns — up: 0=discesa 1=salita; ns: 0=asse E-O 1=N-S)
 //   WALLDEC     ->  "OK <n>" + decorazioni murali random per-faccia (7 righe:
 //                   fx/fy/dir/tipoT/graphicNear/wPix/hPix)
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
@@ -2161,6 +2192,164 @@ static int BridgeSrv_QueueChamp(BridgeClient *c, int ord)
   return 1;
 }
 
+// ============================================================================
+// SALVATAGGIO/CARICAMENTO IN JSON (comandi SAVE / SAVES / LOAD, vedi SaveJson.cpp)
+//
+// SAVE <nome>  - scrive saves/<nome>.json direttamente dalla memoria viva
+//                (nessun menu: tutto il percorso dati e' codice piano).
+// SAVES        - elenca i salvataggi presenti con i metadati.
+// LOAD <nome>  - SOLO al titolo (livello non caricato): ricostruisce
+//                CSBGAME.DAT dal JSON e guida il resume nativo iniettando
+//                nella coda mouse 201 ("Resume") e poi 210 (primo file nel
+//                menu "SELECT GAME FILE" — stessa lista bottoni 210-213 del
+//                menu master). A partita in corso risponde ERR ingame:
+//                usare prima QUIT e riavviare CSBwin.
+// QUIT         - uscita pulita (UIM_TERMINATE), per orchestrare il reload.
+// ============================================================================
+
+// inietta un codice-voce di menu nella coda mouse (pattern del comando START)
+static void Bridge_InjectMenuCode(int code)
+{
+  int q = d.MouseQEnd + 1;
+  if (q > MOUSEQLEN - 1) q -= MOUSEQLEN;
+  pMouseQueue[q].num = (ui16)code;
+  pMouseQueue[q].x = 0;
+  pMouseQueue[q].y = 0;
+  d.MouseQEnd = (i16)q;
+}
+
+// nome salvataggio: solo [A-Za-z0-9_-], 1..64 caratteri
+static bool Bridge_SaveNameOK(const char *s)
+{
+  int n = 0;
+  for (; s[n]; n++)
+  {
+    char ch = s[n];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+          (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'))
+      return false;
+  }
+  return n >= 1 && n <= 64;
+}
+
+// macchina a stati del LOAD (avanza in BridgeSrv_Tick, anche al titolo).
+// ATTENZIONE: il menu master (QUIT/DUNGEON/UTILITY/HINT, codici 210-213) e il
+// menu "SELECT GAME FILE" usano la STESSA lista bottoni [1][3]; si distinguono
+// solo per l'ORDINE nella sequenza (il menu file appare dopo il Resume 201).
+//   0 = inattivo
+//   1 = attende il menu master ([1][3] attiva) -> inietta 211 (DUNGEON)
+//   2 = attende che il menu master venga consumato ([1][3] non attiva)
+//   3 = al titolo: ritenta 201 (Resume) ~1/s finche' [1][3] riappare
+//       (stavolta e' il menu file) -> inietta 210 (prima voce = CSBGAME.DAT)
+//   4 = attende bridgeLevelReady (partita caricata)
+static int bridgeLoadStage = 0;
+static int bridgeLoadTicks = 0;          // per il timeout (~100 tick/s)
+
+static void Bridge_LoadTick(void)
+{
+  if (bridgeLoadStage == 0) return;
+  if (++bridgeLoadTicks > 6000)          // ~60 s: qualcosa e' andato storto
+  {
+    printf("[bridge] LOAD: timeout allo stadio %d\n", bridgeLoadStage);
+    fflush(stdout);
+    bridgeLoadStage = 0;
+    return;
+  }
+  bool fileMenu = (d.PrimaryButtonList == d.pButn18970[1][3]);
+  switch (bridgeLoadStage)
+  {
+  case 1:
+    if (fileMenu)                        // qui e' il menu master
+    {
+      printf("[bridge] LOAD: menu master, inietto 211 (DUNGEON)\n");
+      fflush(stdout);
+      Bridge_InjectMenuCode(211);
+      bridgeLoadStage = 2;
+    }
+    break;
+  case 2:
+    if (!fileMenu)                       // menu master consumato
+    {
+      bridgeLoadStage = 3;
+      bridgeLoadTicks = 0;
+    }
+    break;
+  case 3:
+    if (fileMenu)                        // riapparsa [1][3]: menu file
+    {
+      printf("[bridge] LOAD: menu file, inietto 210 (CSBGAME.DAT)\n");
+      fflush(stdout);
+      Bridge_InjectMenuCode(210);
+      bridgeLoadStage = 4;
+      bridgeLoadTicks = 0;
+    }
+    else if (bridgeLoadTicks % 100 == 0) // ~1/s: Resume al titolo
+    {
+      Bridge_InjectMenuCode(201);
+    }
+    break;
+  case 4:
+    if (bridgeLevelReady)
+    {
+      printf("[bridge] LOAD: livello caricato, resume completato\n");
+      fflush(stdout);
+      bridgeLoadStage = 0;
+    }
+    break;
+  }
+}
+
+// SAVES: una riga per salvataggio: <nome>\t<data>\t<livello>\t<campioni>
+// (metadati estratti dalla sezione "meta" in testa al JSON)
+static void EmitSavesText(FILE *f)
+{
+  DIR *dir = opendir("saves");
+  if (!dir) return;
+  struct dirent *de;
+  while ((de = readdir(dir)) != NULL)
+  {
+    const char *n = de->d_name;
+    size_t len = strlen(n);
+    if (len < 6 || strcmp(n + len - 5, ".json") != 0) continue;
+
+    char path[512];
+    snprintf(path, sizeof(path), "saves/%s", n);
+    FILE *sf = fopen(path, "r");
+    if (!sf) continue;
+    char head[1024];
+    size_t rd = fread(head, 1, sizeof(head) - 1, sf);
+    fclose(sf);
+    head[rd] = 0;
+
+    // estrazione grezza dei campi meta (sono nei primi byte del file)
+    char date[64] = "?";
+    int lvl = -1;
+    char champs[256] = "";
+    char *p;
+    if ((p = strstr(head, "\"date\": \"")) != NULL)
+      sscanf(p + 9, "%63[^\"]", date);
+    if ((p = strstr(head, "\"partyLevel\": ")) != NULL)
+      lvl = atoi(p + 14);
+    if ((p = strstr(head, "\"champions\": [")) != NULL)
+    {
+      char *e = strchr(p, ']');
+      if (e && (size_t)(e - p - 14) < sizeof(champs))
+      {
+        memcpy(champs, p + 14, (size_t)(e - p - 14));
+        champs[e - p - 14] = 0;
+        // togli le virgolette per compattezza
+        char *w = champs;
+        for (char *r = champs; *r; r++) if (*r != '"') *w++ = *r;
+        *w = 0;
+      }
+    }
+    char base[256];
+    snprintf(base, sizeof(base), "%.*s", (int)(len - 5), n);
+    fprintf(f, "%s\t%s\t%d\t%s\n", base, date, lvl, champs);
+  }
+  closedir(dir);
+}
+
 static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
 {
   while (*line == ' ') line++;                       // trim sinistro
@@ -2220,6 +2409,11 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitPedaneText);
+  }
+  else if (strcmp(line, "STAIRS") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitStairsText);
   }
   else if (strcmp(line, "WALLDEC") == 0)
   {
@@ -2356,6 +2550,115 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
       BridgeSrv_Queue(c, "OK 0\n", 5);
     }
   }
+  else if (strncmp(line, "SAVE ", 5) == 0)
+  {
+    // salvataggio in JSON leggibile, direttamente dalla memoria viva
+    const char *name = line + 5;
+    while (*name == ' ') name++;
+    if (!bridgeLevelReady)
+      BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else if (!Bridge_SaveNameOK(name))
+      BridgeSrv_Queue(c, "ERR badname\n", 12);
+    else
+    {
+      mkdir("saves", 0755);
+      char path[256];
+      snprintf(path, sizeof(path), "saves/%s.json", name);
+      if (SaveJson_SaveGame(path, name) == 0)
+        BridgeSrv_Queue(c, "OK 0\n", 5);
+      else
+      {
+        char msg[320];
+        int ml = snprintf(msg, sizeof(msg), "ERR save %s\n", SaveJson_Error());
+        BridgeSrv_Queue(c, msg, (size_t)ml);
+      }
+    }
+  }
+  else if (strcmp(line, "SAVES") == 0)
+  {
+    BridgeSrv_QueueFramed(c, "OK", EmitSavesText);
+  }
+  else if (strncmp(line, "LOAD ", 5) == 0)
+  {
+    // caricamento: solo al titolo (vedi commento in testa alla sezione)
+    const char *name = line + 5;
+    while (*name == ' ') name++;
+    if (bridgeLevelReady)
+      BridgeSrv_Queue(c, "ERR ingame\n", 11);
+    else if (bridgeLoadStage != 0)
+      BridgeSrv_Queue(c, "ERR loading\n", 12);
+    else if (!Bridge_SaveNameOK(name))
+      BridgeSrv_Queue(c, "ERR badname\n", 12);
+    else
+    {
+      char path[256];
+      snprintf(path, sizeof(path), "saves/%s.json", name);
+      if (SaveJson_JsonToDat(path, "CSBGAME.DAT") != 0)
+      {
+        char msg[320];
+        int ml = snprintf(msg, sizeof(msg), "ERR load %s\n", SaveJson_Error());
+        BridgeSrv_Queue(c, msg, (size_t)ml);
+      }
+      else
+      {
+        bridgeLoadStage = 1;               // la sequenza parte dal menu master
+        bridgeLoadTicks = 0;
+        BridgeSrv_Queue(c, "OK 0\n", 5);   // avviato: il client fa poll su STATE
+      }
+    }
+  }
+  else if (strcmp(line, "QUIT") == 0)
+  {
+    BridgeSrv_Queue(c, "OK 0\n", 5);
+    UI_PushMessage(UIM_TERMINATE);
+  }
+  else if (strcmp(line, "MENUCODES") == 0)
+  {
+    // debug: codici (word0) delle liste bottoni dei menu DoMenu
+    char msg[512];
+    int ml = 0;
+    ml += snprintf(msg + ml, sizeof(msg) - (size_t)ml, "OK 2\n");
+    for (int p2 = 0; p2 < 2; p2++)
+    {
+      ml += snprintf(msg + ml, sizeof(msg) - (size_t)ml, "P2=%d:", p2);
+      for (int nb = 0; nb < 4; nb++)
+      {
+        ml += snprintf(msg + ml, sizeof(msg) - (size_t)ml, " [%d]=", nb + 1);
+        for (int i = 0; i <= nb; i++)
+          ml += snprintf(msg + ml, sizeof(msg) - (size_t)ml, "%d%s",
+                         (int)d.pButn18970[p2][nb][i].word0, i < nb ? "," : "");
+      }
+      ml += snprintf(msg + ml, sizeof(msg) - (size_t)ml, "\n");
+    }
+    BridgeSrv_Queue(c, msg, (size_t)ml);
+  }
+  else if (strncmp(line, "INJECT ", 7) == 0)
+  {
+    // debug/test: inietta un codice-voce grezzo nella coda mouse
+    Bridge_InjectMenuCode(atoi(line + 7));
+    BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "CONVERT ", 8) == 0)
+  {
+    // debug/test: CONVERT <nome> <file.dat> — JsonToDat su file arbitrario
+    char nm[128], out[128];
+    if (sscanf(line + 8, "%127s %127s", nm, out) != 2 ||
+        !Bridge_SaveNameOK(nm))
+      BridgeSrv_Queue(c, "ERR badargs\n", 12);
+    else
+    {
+      char path[256];
+      snprintf(path, sizeof(path), "saves/%s.json", nm);
+      if (SaveJson_JsonToDat(path, out) == 0)
+        BridgeSrv_Queue(c, "OK 0\n", 5);
+      else
+      {
+        char msg[320];
+        int ml = snprintf(msg, sizeof(msg), "ERR convert %s\n", SaveJson_Error());
+        BridgeSrv_Queue(c, msg, (size_t)ml);
+      }
+    }
+  }
   else if (strcmp(line, "SUB") == 0)
   {
     c->sub = true;
@@ -2407,6 +2710,7 @@ static void BridgeSrv_PushState(void)
 static void BridgeSrv_Tick(bool levelReady)
 {
   bridgeLevelReady = levelReady;
+  Bridge_LoadTick();               // avanza l'eventuale LOAD in corso
   if (bridgeListenFd == -2) BridgeSrv_Init();
   if (bridgeListenFd < 0) return;
 

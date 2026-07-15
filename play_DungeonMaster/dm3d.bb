@@ -48,10 +48,16 @@ Const DOOR_SMOOTH# = 0.20  ; interpolazione scorrimento porta (0..1)
 Const DOORCAM = 0          ; 1 = camera di debug fissa davanti alla prima porta; 0 = segue il party
 Const SHOT = 0             ; 1 = salva uno screenshot (dm3d_shot.bmp) ed esce (per il print screen)
 
+Const STAIR_N = 6          ; scale: numero di gradini nella cella
+Const STAIR_DROP# = CELL*0.62  ; scale: sviluppo verticale del vano dentro la cella
+
 Global woodtex             ; texture legno dell'anta (vista anche da BuildWoodDoor)
 Global irontex             ; texture ferro della grata (vista anche da BuildIronDoor)
 Global walltex             ; texture muro (vista anche da BuildDoorFrame per gli stipiti)
 Global jambtex             ; stessa texture muro ma con UV scalate per gli stipiti stretti
+Global walltexN            ; normal map del muro (slot 1; vista da BuildRockWall/BuildStairs)
+Global floortex            ; texture pavimento (vista anche da BuildStairs per i gradini)
+Global floortexN           ; normal map del pavimento (slot 1)
 Global mvImg = 0           ; immagine dei pulsanti movimento (mvbuttons.png, estratta da DM)
 Global mvImgDark = 0       ; versione SCURITA (pannello scheda aperto: disabilitati)
 Global hovImg = 0          ; highlight semi-trasparente per la cella sotto il mouse
@@ -341,6 +347,26 @@ If BridgeReq("DOORORN") >= 1 Then
 	Next
 EndIf
 
+; scale (statico): direzione (0=discesa 1=salita) e asse (0=E-O 1=N-S) dai
+; cellflags, via comando STAIRS del ponte. -1 = ignoto (fallback: discesa).
+Dim stairUpAt(W*H)
+Dim stairNSAt(W*H)
+For i = 0 To W*H-1 : stairUpAt(i) = -1 : stairNSAt(i) = -1 : Next
+If BridgeReq("STAIRS") >= 1 Then
+	sdc = Int(brLine$(0)) : sk = 1
+	For m = 1 To sdc
+		ax = Int(brLine$(sk))
+		ay = Int(brLine$(sk+1))
+		aup = Int(brLine$(sk+2))
+		ans = Int(brLine$(sk+3))
+		sk = sk + 4
+		If ax >= 0 And ax < W And ay >= 0 And ay < H Then
+			stairUpAt(ay*W+ax) = aup
+			stairNSAt(ay*W+ax) = ans
+		EndIf
+	Next
+EndIf
+
 ; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
 For y = 0 To H-1
 	row$ = grid$(y)
@@ -357,26 +383,37 @@ For y = 0 To H-1
 			If walltex  <> 0 Then EntityTexture wall, walltex,  0, 0   ; diffuse slot 0
 			If walltexN <> 0 Then EntityTexture wall, walltexN, 0, 1   ; normal map slot 1
 		Else
-			; cella calpestabile: piastrella pavimento (y=0) + soffitto (y=CELL)
-			ft = CreateCube()
-			ScaleEntity ft, CELL/2.0, 0.1, CELL/2.0
-			PositionEntity ft, wx, 0.0, wz
-			If floortex <> 0 Then
-				EntityColor ft, 255, 255, 255
-				EntityTexture ft, floortex, 0, 0                       ; diffuse slot 0
-				If floortexN <> 0 Then EntityTexture ft, floortexN, 0, 1 ; normal map slot 1
-			Else
-				EntityColor ft, 60, 60, 60
+			; scale nella cella? il vano buca il pavimento (discesa) o il
+			; soffitto (salita), quindi la piastrella corrispondente NON va creata.
+			stUp = 0
+			If c$ = "3" Then
+				If stairUpAt(y*W+x) = 1 Then stUp = 1
 			EndIf
 
-			ct = CreateCube()
-			ScaleEntity ct, CELL/2.0, 0.1, CELL/2.0
-			PositionEntity ct, wx, CELL, wz
-			If ceiltex <> 0 Then
-				EntityColor ct, 100, 100, 100   ; tinta scura: soffitto piu' buio
-				EntityTexture ct, ceiltex
-			Else
-				EntityColor ct, 40, 40, 40
+			; cella calpestabile: piastrella pavimento (y=0) + soffitto (y=CELL)
+			If c$ <> "3" Or stUp = 1 Then
+				ft = CreateCube()
+				ScaleEntity ft, CELL/2.0, 0.1, CELL/2.0
+				PositionEntity ft, wx, 0.0, wz
+				If floortex <> 0 Then
+					EntityColor ft, 255, 255, 255
+					EntityTexture ft, floortex, 0, 0                       ; diffuse slot 0
+					If floortexN <> 0 Then EntityTexture ft, floortexN, 0, 1 ; normal map slot 1
+				Else
+					EntityColor ft, 60, 60, 60
+				EndIf
+			EndIf
+
+			If c$ <> "3" Or stUp = 0 Then
+				ct = CreateCube()
+				ScaleEntity ct, CELL/2.0, 0.1, CELL/2.0
+				PositionEntity ct, wx, CELL, wz
+				If ceiltex <> 0 Then
+					EntityColor ct, 100, 100, 100   ; tinta scura: soffitto piu' buio
+					EntityTexture ct, ceiltex
+				Else
+					EntityColor ct, 40, 40, 40
+				EndIf
 			EndIf
 
 			; anta della porta (Fase A): pannello che riempie il varco, orientato
@@ -430,10 +467,24 @@ For y = 0 To H-1
 					EndIf
 				EndIf
 			Else If c$ = "3" Then
-				st = CreateCube()
-				ScaleEntity st, CELL/3.0, 0.3, CELL/3.0
-				PositionEntity st, wx, 0.6, wz
-				EntityColor st, 200, 200, 60
+				; scale in GEOMETRIA: i gradini si sviluppano via dall'ingresso
+				; (il vicino calpestabile sull'asse della scala). Griglia->mondo:
+				; est = -X, ovest = +X, nord = -Z, sud = +Z.
+				oW = (x > 0)   And (Mid$(grid$(y), x, 1)   <> "0")
+				oE = (x < W-1) And (Mid$(grid$(y), x+2, 1) <> "0")
+				oN = (y > 0)   And (Mid$(grid$(y-1), x+1, 1) <> "0")
+				oS = (y < H-1) And (Mid$(grid$(y+1), x+1, 1) <> "0")
+				sdx# = 0 : sdz# = 0
+				If stairNSAt(y*W+x) = 1 Then
+					; asse nord-sud: sviluppo verso il lato chiuso
+					sdz = 1
+					If oS And (Not oN) Then sdz = -1
+				Else
+					; asse est-ovest (o ignoto)
+					sdx = 1
+					If oW And (Not oE) Then sdx = -1
+				EndIf
+				BuildStairs(wx, wz, sdx, sdz, stUp)
 			EndIf
 		EndIf
 	Next
@@ -716,6 +767,19 @@ If BridgeReq("WALLDEC") >= 1 Then
 				If dir = 1 Then BuildWallHook(cxw - hnear, hky, czw, -90)
 				If dir = 2 Then BuildWallHook(cxw, hky, czw - hnear, 0)
 				If dir = 3 Then BuildWallHook(cxw, hky, czw + hnear, 180)
+				Goto wdecNext
+			EndIf
+			; l'ANELLO (tipo 6) e' in vera geometria 3D: fibbia di ferro
+			; inchiodata + anello scuro appeso (BuildWallRing, dm3d_world.bb).
+			If wdt = 6 Then
+				cxw# = (W-1-fx)*CELL
+				czw# = fy*CELL
+				hky# = EYE                     ; anello in mezzeria (come il decal 2D)
+				hnear# = CELL/2.0 - 0.02
+				If dir = 0 Then BuildWallRing(cxw + hnear, hky, czw, 90)
+				If dir = 1 Then BuildWallRing(cxw - hnear, hky, czw, -90)
+				If dir = 2 Then BuildWallRing(cxw, hky, czw - hnear, 0)
+				If dir = 3 Then BuildWallRing(cxw, hky, czw + hnear, 180)
 				Goto wdecNext
 			EndIf
 			If wdecTex(wdt) = 0 Then

@@ -337,6 +337,21 @@ Function DrawInvPanel()
 	EndIf
 End Function
 
+; ricarica i font DM usati dal pannello salvataggio: workaround del bug del
+; runtime GL che a lunga esecuzione PERDE glifi delle AnimImage (si vedono
+; lettere mancanti, es. "SAL A"); alla riapertura del pannello si guarisce.
+; Bug engine da indagare a parte (vedi memoria di progetto).
+Function ReloadDMFonts()
+	If fntGrey <> 0 Then FreeImage fntGrey
+	If fntOrange <> 0 Then FreeImage fntOrange
+	If fntYellow <> 0 Then FreeImage fntYellow
+	If fntRed <> 0 Then FreeImage fntRed
+	fntGrey   = LoadAnimImage("invgfx/font_grey.png",   16, 16, 0, 128)
+	fntOrange = LoadAnimImage("invgfx/font_orange.png", 16, 16, 0, 128)
+	fntYellow = LoadAnimImage("invgfx/font_yellow.png", 16, 16, 0, 128)
+	fntRed    = LoadAnimImage("invgfx/font_red.png",    16, 16, 0, 128)
+End Function
+
 ; testo col font ORIGINALE DM: img = atlante colorato (frame = codice ASCII),
 ; avanzamento 6px gioco alla scala corrente. x,y = angolo alto-sinistro.
 Function DMText(x, y, s$, img)

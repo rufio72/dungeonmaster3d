@@ -212,6 +212,21 @@ Dim rrcCode(3), rrcX1(3), rrcX2(3), rrcY1(3), rrcY2(3)   ; bottoni (spazio mouse
 Global rrcN = 0
 Global invReady = 0               ; tutte le grafiche/metadati caricati
 
+; --- pannello salvataggio (floppy in alto a dx del pannello inventario) ---
+; salvataggi JSON multi-slot del bridge (SAVE/SAVES), NON il menu disco
+; nativo del 2D (mono-slot su CSBGAME.DAT)
+Global savePanel = 0              ; 1 = pannello "SALVA PARTITA" aperto
+Global saveName$ = ""             ; nome in digitazione
+Global saveWait = 0               ; risposta bridge attesa: 1=ack SAVE, 2=lista SAVES
+Global savesN = 0                 ; salvataggi sul disco (lista SAVES)
+Dim savesName$(31)                ; nome file (senza .json)
+Dim savesInfo$(31)                ; data/ora compatta "gg/mm hh:mm"
+Dim savesChamp$(31)               ; campioni ("IAIDO +2")
+Global saveMsg$ = ""              ; esito ultima operazione (mostrato nel pannello)
+Global saveMsgT = 0               ; scadenza del messaggio (MilliSecs)
+Global loadArm = 0                ; CARICA armato (serve il secondo click di conferma)
+Global loadArmT = 0               ; scadenza della conferma (MilliSecs)
+
 Dim pliV(31)                      ; appoggio di ParseInts (numeri estratti da una riga)
 
 ; --- oggetti a terra (comandi FLOOR/FLOORP del bridge) ---
@@ -313,12 +328,15 @@ Dim doorEnt(W*H)
 Dim doorBaseY#(W*H)
 Dim doorOpen#(W*H)
 Dim doorTarget#(W*H)       ; apertura bersaglio dall'ultimo PUSH (0=chiusa..1=su)
+Dim portFace(W*H)          ; bitmask (1 Shl dir) delle facce con specchio-campione
 
 ; tipo di ogni porta (statico): letto UNA volta dal ponte (STATE via TCP) per
 ; scegliere lo stile in costruzione. -1 = sconosciuto (default: ferro).
 Dim doorTypeAt(W*H)
 For i = 0 To W*H-1 : doorTypeAt(i) = -1 : Next
+curLv = 0                  ; livello corrente (per la cache dei ritratti)
 If BridgeReq("STATE") >= 6 Then
+	curLv = Int(brLine$(3))
 	tk = 4                                           ; 0..3 = px,py,facing,level
 	tmc = Int(brLine$(tk)) : tk = tk + 1 + tmc*3     ; salta i mostri (3 righe l'uno)
 	tdc = Int(brLine$(tk)) : tk = tk + 1             ; n. porte
@@ -367,6 +385,47 @@ If BridgeReq("STAIRS") >= 1 Then
 	Next
 EndIf
 
+; dispositivi murali (statico): letti PRIMA della costruzione perche' le
+; NICCHIE (altare di Vi T=2, grandi alcove T=59) sono SCAVATE nel muro:
+; quelle celle-muro vanno costruite col vano al posto del cubo pieno.
+; Payload DEVICES: fx/fy/dir/actuatorType/tipoT/graphicNear/wPix/hPix.
+Const DEV_MAX = 127
+Dim devFx(DEV_MAX), devFy(DEV_MAX), devDir(DEV_MAX), devT(DEV_MAX)
+Dim devGw(DEV_MAX), devGh(DEV_MAX)
+Global devN = 0
+Dim nicheDir(W*H)                 ; -1 = muro pieno; 0..3 = dir del vano
+Dim nicheT(W*H)
+For i = 0 To W*H-1 : nicheDir(i) = -1 : Next
+If BridgeReq("DEVICES") >= 1 Then
+	dvc = Int(brLine$(0)) : dvk = 1
+	For m = 1 To dvc
+		If devN <= DEV_MAX Then
+			devFx(devN)  = Int(brLine$(dvk))
+			devFy(devN)  = Int(brLine$(dvk+1))
+			devDir(devN) = Int(brLine$(dvk+2))     ; dvk+3 = actuatorType (per ora inutile)
+			devT(devN)   = Int(brLine$(dvk+4))     ; dvk+5 = graphicNumber
+			devGw(devN)  = Int(brLine$(dvk+6))
+			devGh(devN)  = Int(brLine$(dvk+7))
+			devN = devN + 1
+		EndIf
+		dvk = dvk + 8
+	Next
+	; marca le celle-muro con nicchia (il vano si apre verso fx,fy)
+	For m = 0 To devN-1
+		If devT(m) = 2 Or devT(m) = 59 Then
+			ax = devFx(m) : ay = devFy(m)
+			If devDir(m) = 0 Then ax = ax - 1
+			If devDir(m) = 1 Then ax = ax + 1
+			If devDir(m) = 2 Then ay = ay - 1
+			If devDir(m) = 3 Then ay = ay + 1
+			If ax >= 0 And ax < W And ay >= 0 And ay < H Then
+				nicheDir(ay*W+ax) = devDir(m)
+				nicheT(ay*W+ax) = devT(m)
+			EndIf
+		EndIf
+	Next
+EndIf
+
 ; costruzione: muri (cubi alti) + pavimento/soffitto come piastrelle per cella
 For y = 0 To H-1
 	row$ = grid$(y)
@@ -375,13 +434,24 @@ For y = 0 To H-1
 		wx# = (W-1-x)*CELL
 		wz# = y*CELL
 		If c$ = "0" Then
-			; muro (cubo alto 0..CELL)
-			wall = CreateCube()
-			ScaleEntity wall, CELL/2.0, CELL/2.0, CELL/2.0
-			PositionEntity wall, wx, CELL/2.0, wz
-			EntityColor wall, 255, 255, 255
-			If walltex  <> 0 Then EntityTexture wall, walltex,  0, 0   ; diffuse slot 0
-			If walltexN <> 0 Then EntityTexture wall, walltexN, 0, 1   ; normal map slot 1
+			If nicheDir(y*W+x) >= 0 Then
+				; muro con NICCHIA scavata (altare di Vi / alcova): il vano si
+				; apre verso la cella adiacente. Yaw come i dispositivi murali.
+				nyaw# = 0
+				If nicheDir(y*W+x) = 0 Then nyaw = 90
+				If nicheDir(y*W+x) = 1 Then nyaw = -90
+				If nicheDir(y*W+x) = 2 Then nyaw = 0
+				If nicheDir(y*W+x) = 3 Then nyaw = 180
+				BuildNicheWall(wx, wz, nyaw, nicheT(y*W+x))
+			Else
+				; muro (cubo alto 0..CELL)
+				wall = CreateCube()
+				ScaleEntity wall, CELL/2.0, CELL/2.0, CELL/2.0
+				PositionEntity wall, wx, CELL/2.0, wz
+				EntityColor wall, 255, 255, 255
+				If walltex  <> 0 Then EntityTexture wall, walltex,  0, 0   ; diffuse slot 0
+				If walltexN <> 0 Then EntityTexture wall, walltexN, 0, 1   ; normal map slot 1
+			EndIf
 		Else
 			; scale nella cella? il vano buca il pavimento (discesa) o il
 			; soffitto (salita), quindi la piastrella corrispondente NON va creata.
@@ -618,6 +688,31 @@ Next
 ;   fx, fy (cella calpestabile) + dir muro (0=ovest 1=est 2=nord 3=sud) + ord
 ;   + act (0 = specchio gia' usato: nel 2D e' PORTRAIT_InActive, sbiadito)
 ; Coordinate griglia identiche alla mappa, quindi stessa proiezione della camera.
+;
+; CACHE PERSISTENTE (portcache_<liv>.txt, righe "fx fy dir ord"): il 2D
+; CANCELLA il record del ritratto quando il campione viene reclutato (al suo
+; posto resta il device T=43 "specchio vuoto"), quindi a un riavvio del
+; viewer il bridge non sa piu' CHI c'era in quello specchio. La cache impara
+; ogni specchio visto; alla costruzione, le posizioni in cache che il bridge
+; non elenca piu' diventano quadri SBIADITI (act=0), come da design.
+Dim pcFx(63) : Dim pcFy(63) : Dim pcDir(63) : Dim pcOrd(63) : Dim pcHit(63)
+Dim pmFx(95) : Dim pmFy(95) : Dim pmDir(95) : Dim pmOrd(95) : Dim pmAct(95)
+pcN = 0
+pcache$ = "portcache_" + curLv + ".txt"
+pcf = ReadFile(pcache$)
+If pcf <> 0 Then
+	While Not Eof(pcf)
+		If ParseInts(ReadLine$(pcf)) >= 4 And pcN < 64 Then
+			pcFx(pcN) = pliV(0) : pcFy(pcN) = pliV(1)
+			pcDir(pcN) = pliV(2) : pcOrd(pcN) = pliV(3)
+			pcHit(pcN) = 0
+			pcN = pcN + 1
+		EndIf
+	Wend
+	CloseFile pcf
+EndIf
+; 1) entry vive dal bridge (aggiornano/estendono la cache)
+pmN = 0
 If BridgeReq("PORTRAITS") >= 1 Then
 	pcount = Int(brLine$(0))
 	pk = 1
@@ -628,6 +723,48 @@ If BridgeReq("PORTRAITS") >= 1 Then
 		ord = Int(brLine$(pk+3))
 		act = Int(brLine$(pk+4))
 		pk = pk + 5
+		pfound = 0
+		For j = 0 To pcN-1
+			If pcFx(j) = fx And pcFy(j) = fy And pcDir(j) = dir Then
+				pcOrd(j) = ord : pcHit(j) = 1 : pfound = 1
+			EndIf
+		Next
+		If pfound = 0 And pcN < 64 Then
+			pcFx(pcN) = fx : pcFy(pcN) = fy : pcDir(pcN) = dir
+			pcOrd(pcN) = ord : pcHit(pcN) = 1
+			pcN = pcN + 1
+		EndIf
+		If pmN < 96 Then
+			pmFx(pmN) = fx : pmFy(pmN) = fy : pmDir(pmN) = dir
+			pmOrd(pmN) = ord : pmAct(pmN) = act
+			pmN = pmN + 1
+		EndIf
+	Next
+EndIf
+; 2) specchi in cache che il bridge non elenca piu' = usati: quadro sbiadito
+For j = 0 To pcN-1
+	If pcHit(j) = 0 And pmN < 96 Then
+		pmFx(pmN) = pcFx(j) : pmFy(pmN) = pcFy(j) : pmDir(pmN) = pcDir(j)
+		pmOrd(pmN) = pcOrd(j) : pmAct(pmN) = 0
+		pmN = pmN + 1
+	EndIf
+Next
+; 3) riscrivi la cache (unione)
+pcf = WriteFile(pcache$)
+If pcf <> 0 Then
+	For j = 0 To pcN-1
+		WriteLine pcf, pcFx(j) + " " + pcFy(j) + " " + pcDir(j) + " " + pcOrd(j)
+	Next
+	CloseFile pcf
+EndIf
+; 4) costruzione dei quadri (lista unita)
+If pmN > 0 Then
+	For i = 0 To pmN-1
+		fx  = pmFx(i)
+		fy  = pmFy(i)
+		dir = pmDir(i)
+		ord = pmOrd(i)
+		act = pmAct(i)
 		If fx >= 0 And fx < W And fy >= 0 And fy < H Then
 			cxw# = (W-1-fx)*CELL             ; mondo riflesso su X (come la camera)
 			czw# = fy*CELL
@@ -665,6 +802,9 @@ If BridgeReq("PORTRAITS") >= 1 Then
 				portEnt(ord) = pic
 				SetPortraitActive(ord, act)
 			EndIf
+			; questa faccia ha il quadro-campione: il decal T=43 dello
+			; specchio vuoto (loop DEVICES) qui NON va disegnato
+			portFace(fy*W+fx) = portFace(fy*W+fx) Or (1 Shl dir)
 		EndIf
 	Next
 EndIf
@@ -836,6 +976,63 @@ If BridgeReq("WALLDEC") >= 1 Then
 	Next
 EndIf
 
+; ---------------------------------------------- dispositivi murali (DEVICES)
+; Attuatori CON GRAFICA sulle facce dei muri: manette, porta-torce,
+; interruttori... (il 2D li disegna al posto della decorazione random).
+; Dati gia' letti negli array dev* PRIMA della costruzione. Le NICCHIE
+; (altare di Vi T=2, alcove T=59) sono gia' SCAVATE nel muro dal loop di
+; costruzione (BuildNicheWall): qui si saltano. Gli altri per ora sono
+; decal, stessa libreria walldec/t<T>.png delle decorazioni random.
+; Il click (deporre le ossa, girare interruttori) arrivera' col pattern RRC.
+For i = 0 To devN-1
+	fx  = devFx(i)
+	fy  = devFy(i)
+	dir = devDir(i)
+	wdt = devT(i)
+	wdw = devGw(i)
+	wdh = devGh(i)
+	If wdw <= 0 Then wdw = 32
+	If wdh <= 0 Then wdh = 32
+	If fx >= 0 And fx < W And fy >= 0 And fy < H And wdt >= 0 And wdt < 64 Then
+		; lo specchio vuoto (T=43) su una faccia che ha il quadro-campione
+		; NON si disegna: il ritratto 3D sbiadito (sistema PORTRAITS) basta;
+		; i T=43 "veri" (es. (16,17) del livello 0) restano decal
+		devSkip = 0
+		If wdt = 43 Then
+			If (portFace(fy*W+fx) And (1 Shl dir)) <> 0 Then devSkip = 1
+		EndIf
+		If wdt <> 2 And wdt <> 59 And devSkip = 0 Then
+			cxw# = (W-1-fx)*CELL
+			czw# = fy*CELL
+				If wdecTex(wdt) = 0 Then
+					cust$ = "walldec/t" + wdt + "_custom.png"
+					If FileType(cust$) = 1 Then
+						wdecTex(wdt) = LoadTexture(cust$, 2)                 ; flag 2 = alpha
+					Else
+						wdecTex(wdt) = LoadTexture("walldec/t" + wdt + ".png", 2)
+					EndIf
+					If wdecTex(wdt) <> 0 Then ScaleTexture wdecTex(wdt), 1, -1
+				EndIf
+				If wdecTex(wdt) <> 0 Then
+					dw# = (CELL * wdw) / 224.0 / 2.0
+					dh# = (CELL * wdh) / 136.0 / 2.0
+					ox# = 0.0 : oz# = 0.0
+					sx# = dw : sz# = dw
+					near# = CELL/2.0 - 0.10
+					If dir = 0 Then ox = +near : sx = WDEC_T
+					If dir = 1 Then ox = -near : sx = WDEC_T
+					If dir = 2 Then oz = -near : sz = WDEC_T
+					If dir = 3 Then oz = +near : sz = WDEC_T
+					wdec = CreateCube()
+					ScaleEntity wdec, sx, dh, sz
+					PositionEntity wdec, cxw + ox, EYE, czw + oz
+					EntityColor wdec, 255, 255, 255
+					EntityTexture wdec, wdecTex(wdt)
+				EndIf
+			EndIf
+		EndIf
+	Next
+
 ; ---------------------------------------------------------------- loop live
 px = W/2 : py = H/2 : pf = 0      ; default finche' non leggiamo lo stato
 
@@ -853,12 +1050,18 @@ torchNext = 0       ; ms del prossimo cambio di stato
 torchFlare# = 0.0   ; 0 = baseline arancio .. 1 = fiammata gialla intensa
 torchFlaring = 0    ; 0 = baseline, 1 = sta fiammeggiando
 
-While Not KeyHit(1)
+While 1
+	; ESC: col pannello salva aperto lo chiude, altrimenti esce dal programma
+	If KeyHit(1) Then
+		If savePanel Then savePanel = 0 Else Exit
+	EndIf
+
 	; riconnessione (se CSBwin e' stato chiuso/riaperto): riattiva anche il push
 	If bridge = 0 Then
 		If BridgeConnect() <> 0 Then
 			BridgeReq("SUB")
 			floorPending = 0 : floorDirty = 1   ; richiesta in volo persa col socket
+			saveWait = 0                        ; idem: risposta SAVE/SAVES perduta
 		EndIf
 	EndIf
 
@@ -870,7 +1073,14 @@ While Not KeyHit(1)
 			CloseTCPStream bridge : bridge = 0     ; server sparito: riproveremo
 		Else
 			pn = BridgeRead(hdr$)
-			If Left$(hdr$, 3) = "ERR" Then sheetPending = 0 : floorPending = 0   ; richiesta rifiutata
+			If Left$(hdr$, 3) = "ERR" Then
+				sheetPending = 0 : floorPending = 0   ; richiesta rifiutata
+				If saveWait > 0 Then SaveError(hdr$)
+			EndIf
+			; risposte del pannello salvataggio: "OK 0" (ack SAVE) o "OK n"
+			; (lista SAVES). Col pannello aperto nessun altro comando e' in
+			; volo (i click agli altri widget vengono consumati da SaveUI).
+			If Left$(hdr$, 2) = "OK" And saveWait > 0 Then SavesResponse(pn)
 			If Left$(hdr$, 5) = "SHEET" And pn >= 105 Then ParseSheet()
 			If Left$(hdr$, 5) = "PORTS" And pn >= 1 Then ParsePorts()
 			If Left$(hdr$, 5) = "FLOOR" And pn >= 1 Then BuildFloorObjs(W, H) : floorPending = 0
@@ -1134,6 +1344,10 @@ While Not KeyHit(1)
 	gClickR = MouseHit(2)
 	cmx = MouseX() : cmy = MouseY()
 
+	; pannello salvataggio: se aperto consuma tastiera e click (azzera gClick,
+	; cosi' NESSUN widget sottostante reagisce finche' il pannello e' su)
+	SaveUI()
+
 	; drag&drop del marching-order (PRIMA dei box campione: se il click parte
 	; da una cella del quadrato viene consumato qui e gClick azzerato)
 	MarchUI(pf)
@@ -1162,8 +1376,13 @@ While Not KeyHit(1)
 			If pcPot = 0 Then
 				xx1 = INVX0 + Int(210*INVSC) : xx2 = INVX0 + Int(224*INVSC)
 				xy1 = INVY0 + Int(1*INVSC)   : xy2 = INVY0 + Int(14*INVSC)
+				; floppy (tasto salva del 2D, ibutton 140 a game-x 174..182):
+				; apre il pannello salvataggio JSON del 3D
+				fx1 = INVX0 + Int(168*INVSC) : fx2 = INVX0 + Int(187*INVSC)
 				If cmx >= xx1 And cmx < xx2 And cmy >= xy1 And cmy < xy2 And bridge <> 0 Then
 					WriteLine bridge, "CMD " + (7 + pcSel - 1)
+				ElseIf cmx >= fx1 And cmx < fx2 And cmy >= xy1 And cmy < xy2 Then
+					SaveOpen()
 				Else
 					; drag-and-drop: click su uno slot -> prendi/posa l'oggetto
 					; (il motore 2D fa lo swap objectInHand<->slot via GRAB)
@@ -1201,6 +1420,9 @@ While Not KeyHit(1)
 
 	; cursore drag-and-drop SOPRA il pannello (oggetto in mano / manina in hover)
 	If pcSel > 0 And invReady Then DrawInvCursor()
+
+	; pannello salvataggio sopra tutto (aperto dal floppy dell'inventario)
+	If savePanel Then DrawSavePanel()
 
 	shotN = shotN + 1
 	If SHOT And shotN = 45 Then

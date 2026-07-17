@@ -387,18 +387,19 @@ static int Bridge_ExportDecorGfx(void)
 // ---- estrazione BOTTONI (attuatori sul muro: pulsanti/serrature) ----------
 // Ogni decorazione murale tipo T usa le grafiche 121 + 2*T (2 per decorazione).
 // I dispositivi che aprono le porte: interruttori/pulsanti (7,14,15,16,47,48,49,50,54),
-// leve (44,45) e serrature/keyhole (5,17..32).  Tipo 54 -> grafica 121+2*54=229,
-// quindi dumpiamo 121..235 (tutte le decorazioni); il decoder etichetta dal tipo.
+// leve (44,45) e serrature/keyhole (5,17..32).  L'altare di Vi e' tipo 59 ->
+// grafiche 121+2*59=239/240, quindi dumpiamo 121..255 (tutte le decorazioni,
+// con margine); il decoder etichetta dal tipo.
 [[maybe_unused]] static int Bridge_ExportButtons(void)
 {
   mkdir("buttons", 0755);
   FILE *m = fopen("buttons/buttons.txt", "w");
   if (m == NULL) return 0;
   int saved = 0;
-  for (int N = 121; N <= 235; N++) saved += Bridge_DumpGfx("buttons", m, N);
+  for (int N = 121; N <= 255; N++) saved += Bridge_DumpGfx("buttons", m, N);
   fclose(m);
   Bridge_DumpPalette("buttons");
-  printf("[bridge] bottoni/serrature: %d salvati (121..235) -> buttons/\n", saved);
+  printf("[bridge] bottoni/serrature: %d salvati (121..255) -> buttons/\n", saved);
   fflush(stdout);
   return saved;
 }
@@ -752,7 +753,12 @@ static void EmitPortraitsText(FILE *f)
         DB3 *p = a->CastToDB3();
         if (p == NULL) continue;
         if (p->actuatorType() != 127) continue;            // 127 = portrait
-        if ((p->State() & PORTRAIT_HidePortrait) != 0) continue;
+        // NB: gli specchi gia' usati (HidePortrait, campione reclutato) NON
+        // si saltano piu': si esportano con act=0, cosi' il viewer 3D
+        // costruisce comunque il quadro col volto sbiadito anche se viene
+        // (ri)avviato DOPO il reclutamento. Prima sparivano dalla lista e
+        // al posto del quadro restava solo lo specchio vuoto T=43.
+        int hidden = (p->State() & PORTRAIT_HidePortrait) != 0;
 
         int s  = o.pos() & 3;
         int dx = (int)d.DeltaX[s], dy = (int)d.DeltaY[s];   // muro -> cella
@@ -773,7 +779,7 @@ static void EmitPortraitsText(FILE *f)
         fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir; ordA[cnt] = ord;
         // 5a riga: attivo/spento — il reclutamento disattiva l'attuatore
         // (PORTRAIT_InActive) e nel 2D lo specchio resta sbiadito
-        actA[cnt] = ((p->State() & PORTRAIT_InActive) == 0) ? 1 : 0;
+        actA[cnt] = (!hidden && (p->State() & PORTRAIT_InActive) == 0) ? 1 : 0;
         cnt++;
       }
 
@@ -1197,6 +1203,72 @@ static void EmitWallDecText(FILE *f)
   for (int i = 0; i < cnt; i++)
     fprintf(f, "%d\n%d\n%d\n%d\n%d\n%d\n%d\n",
             fxA[i], fyA[i], dirA[i], tA[i], gA[i], wA[i], hA[i]);
+}
+
+// ---- dispositivi murali (statico, per livello) -----------------------------
+// Attuatori CON GRAFICA sulla faccia di un muro di pietra: altare di Vi,
+// serrature, manette, porta-torce, interruttori, nicchie... Il 2D li disegna
+// al posto della decorazione random (stesso slot); qui li esponiamo con la
+// stessa convenzione di WALLDEC/ritratti: fx,fy = cella calpestabile da cui
+// si vede la faccia, dir = 0=O 1=E 2=N 3=S. Ritratti (127) e pedane (47)
+// restano sui loro canali. Una faccia puo' avere PIU' dispositivi (es.
+// porta-torcia + interruttore): li emettiamo tutti.
+// Formato: count, poi 8 righe/dispositivo:
+//   fx / fy / dir / actuatorType / tipoT / graphicNear / wPix / hPix
+static void EmitDevicesText(FILE *f)
+{
+  int W = d.width, H = d.height;
+  static const int DDX[4]   = { -1, 1, 0, 0 };   // cella -> muro, per dir
+  static const int DDY[4]   = { 0, 0, -1, 1 };
+  static const int DFACE[4] = { 3, 1, 0, 2 };    // party facing che vede la faccia
+
+  int fxA[256], fyA[256], dirA[256], atA[256], tA[256], gA[256], wA[256], hA[256];
+  int cnt = 0;
+  for (int fy = 0; fy < H && cnt < 256; fy++)
+    for (int fx = 0; fx < W && cnt < 256; fx++)
+    {
+      int cf = (int)GetCellFlags(fx, fy);
+      int room = (cf >> 5) & 7;
+      if (room == roomSTONE) continue;
+      if (room == roomFALSEWALL && (cf & 4) == 0) continue;
+      for (int dir = 0; dir < 4 && cnt < 256; dir++)
+      {
+        int wx = fx + DDX[dir], wy = fy + DDY[dir];
+        if (wx < 0 || wx >= W || wy < 0 || wy >= H) continue;
+        int wcf = (int)GetCellFlags(wx, wy);
+        if (((wcf >> 5) & 7) != roomSTONE) continue;   // solo pietra vera
+        int face = (DFACE[dir] + 2) & 3;               // normale della faccia (pos DM)
+        for (RN o = FindFirstObject(wx, wy); o != RNeof; o = GetDBRecordLink(o))
+        {
+          if (((int)o.pos() & 3) != face) continue;
+          if (o.dbType() != dbACTUATOR) continue;
+          DBCOMMON *a = GetCommonAddress(o);
+          DB3 *p = (a != NULL) ? a->CastToDB3() : NULL;
+          if (p == NULL) continue;
+          int at = (int)p->actuatorType();
+          if (at == 127 || at == 47) continue;         // ritratti/pedane: altri canali
+          int wgo = (int)p->wallGraphicOrdinal();
+          if (wgo <= 0) continue;                      // attuatore invisibile
+          int T  = (int)d.WallDecorationTOC[wgo - 1];
+          int gn = 121 + 2 * T + 1;                    // variante near (grande)
+          int gw = 0, gh = 0;
+          ui8 *ux = (ui8 *)d.ppUnExpandedGraphics[gn];
+          if (ux != NULL)
+          {
+            gw = (int)(ui16)LE16(*(i16 *)ux);
+            gh = (int)(ui16)LE16(*(i16 *)(ux + 2));
+          }
+          fxA[cnt] = fx; fyA[cnt] = fy; dirA[cnt] = dir; atA[cnt] = at;
+          tA[cnt] = T; gA[cnt] = gn; wA[cnt] = gw; hA[cnt] = gh;
+          if (++cnt >= 256) break;
+        }
+      }
+    }
+
+  fprintf(f, "%d\n", cnt);
+  for (int i = 0; i < cnt; i++)
+    fprintf(f, "%d\n%d\n%d\n%d\n%d\n%d\n%d\n%d\n",
+            fxA[i], fyA[i], dirA[i], atA[i], tA[i], gA[i], wA[i], hA[i]);
 }
 
 // Indici degli attributi in CHARDESC::Attributes[7] (vedi CSB.h:2564).
@@ -2046,6 +2118,9 @@ static int Bridge_EmitChamp(FILE *f, int ord)
 //                   3 righe/pedana: x/y/ordinale
 //   STAIRS      ->  "OK <n>" + scale del livello (4 righe/scala:
 //                   x/y/up/ns — up: 0=discesa 1=salita; ns: 0=asse E-O 1=N-S)
+//   DEVICES     ->  "OK <n>" + dispositivi murali con grafica (8 righe:
+//                   fx/fy/dir/actuatorType/tipoT/graphicNear/wPix/hPix)
+//   BTNGFX      ->  "OK 0"; ri-estrae le grafiche murali in buttons/ (121..255)
 //   WALLDEC     ->  "OK <n>" + decorazioni murali random per-faccia (7 righe:
 //                   fx/fy/dir/tipoT/graphicNear/wPix/hPix)
 //   PORTRAITS   ->  "OK <n>" + n righe (formato dm_portraits_<N>.txt)
@@ -2414,6 +2489,17 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
   {
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitStairsText);
+  }
+  else if (strcmp(line, "DEVICES") == 0)
+  {
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitDevicesText);
+  }
+  else if (strcmp(line, "BTNGFX") == 0)
+  {
+    // ri-estrae le grafiche delle decorazioni murali (buttons/, 121..255)
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else { Bridge_ExportButtons(); BridgeSrv_Queue(c, "OK 0\n", 5); }
   }
   else if (strcmp(line, "WALLDEC") == 0)
   {

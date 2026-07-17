@@ -39,7 +39,7 @@ endif
         SaveGame.o  Translation.o  Bitmaps.o    md5C.o      utility.o        \
         WinScreen.o Code13ea4.o    Codea59a.o   RC4.o       Attack.o         \
         Sound.o     Code1f9e6.o    Code390e.o   Code222ea.o Statistics.o     \
-        SoundMixer.o Bridge.o
+        SoundMixer.o Bridge.o SaveJson.o
 	g++     \
             DSA.o       data.o        Code11f52.o  Graphics.o  Magic.o        \
             Character.o CSBCode.o     system.o     Timer.o     SmartDiscard.o \
@@ -49,7 +49,7 @@ endif
             SaveGame.o  Translation.o Bitmaps.o    md5C.o      utility.o      \
             WinScreen.o Code13ea4.o   Codea59a.o   RC4.o       Attack.o       \
             Sound.o     Code1f9e6.o   Code390e.o   Code222ea.o Statistics.o   \
-            SoundMixer.o Bridge.o  $(glibs) \
+            SoundMixer.o Bridge.o SaveJson.o  $(glibs) \
 	    -o ./CSB/CSBwin
 
 stdafx.h: Objects.h  CSBTypes.h
@@ -58,8 +58,11 @@ stdafx.h: Objects.h  CSBTypes.h
 SoundMixer.o:  SoundMixer.cpp SoundMixer.h
 	$(comp) SoundMixer.cpp
 
-Bridge.o: Bridge.cpp Bridge.h stdafx.h UI.h Dispatch.h Data.h CSB.h Objects.h
+Bridge.o: Bridge.cpp Bridge.h SaveJson.h stdafx.h UI.h Dispatch.h Data.h CSB.h Objects.h
 	$(comp) Bridge.cpp
+
+SaveJson.o: SaveJson.cpp SaveJson.h stdafx.h UI.h Dispatch.h Data.h CSB.h
+	$(comp) SaveJson.cpp
 
 AsciiDump.o: AsciiDump.cpp stdafx.h UI.h Dispatch.h Data.h CSB.h
 	$(comp) AsciiDump.cpp

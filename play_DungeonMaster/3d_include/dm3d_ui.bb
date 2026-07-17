@@ -544,3 +544,295 @@ Function MarchUI(pfc)
 		EndIf
 	EndIf
 End Function
+
+; =========================================================================
+; PANNELLO SALVATAGGIO ("SALVA PARTITA")
+; Aperto dal floppy in alto a destra del pannello inventario. Usa i
+; salvataggi JSON multi-slot del bridge (SAVE <nome> / SAVES), NON il menu
+; disco nativo del 2D. Digitazione del nome + lista dei salvataggi esistenti
+; (click su una riga = riusa quel nome); INVIO o bottone SALVA salvano,
+; ESC o click fuori dal pannello chiudono. Le risposte del bridge sono
+; asincrone: saveWait dice cosa aspettiamo (1 = ack del SAVE, 2 = lista),
+; il drenaggio nel main loop chiama SavesResponse/SaveError.
+; Geometria: lo STESSO riquadro del pannello inventario (INVX0/INVY0,
+; 224x136 px gioco a scala INVSC), cosi' copre esattamente la scheda.
+; =========================================================================
+
+Function SaveOpen()
+	savePanel = 1
+	saveName$ = ""
+	saveMsg$ = "" : saveMsgT = 0
+	loadArm = 0
+	ReloadDMFonts()      ; guarisce i glifi persi dal bug runtime (vedi funzione)
+	FlushKeys
+	SavesRequest()
+End Function
+
+; chiede la lista dei salvataggi (risposta "OK n" gestita da SavesResponse)
+Function SavesRequest()
+	If bridge <> 0 Then
+		WriteLine bridge, "SAVES"
+		saveWait = 2
+	EndIf
+End Function
+
+; invia il SAVE (ack "OK 0" gestito da SavesResponse con saveWait=1)
+Function DoSave()
+	If saveWait <> 0 Then Return              ; richiesta gia' in volo
+	If saveName$ = "" Then
+		saveMsg$ = "SERVE UN NOME" : saveMsgT = MilliSecs() + 2500
+		Return
+	EndIf
+	If bridge = 0 Then
+		saveMsg$ = "BRIDGE NON CONNESSO" : saveMsgT = MilliSecs() + 2500
+		Return
+	EndIf
+	WriteLine bridge, "SAVE " + saveName$
+	saveWait = 1
+End Function
+
+; click su CARICA: serve un nome ESISTENTE nella lista; il primo click arma
+; la conferma, il secondo (entro 4s) avvia il ciclo di caricamento
+Function LoadClick()
+	ex = 0
+	For i = 0 To savesN-1
+		If savesName$(i) = saveName$ And saveName$ <> "" Then ex = 1
+	Next
+	If ex = 0 Then
+		saveMsg$ = "SCEGLI UN SALVATAGGIO DALLA LISTA"
+		saveMsgT = MilliSecs() + 3000
+		Return
+	EndIf
+	If loadArm = 0 Or MilliSecs() > loadArmT Then
+		loadArm = 1
+		loadArmT = MilliSecs() + 4000
+		saveMsg$ = "CLICCA ANCORA PER CARICARE"
+		saveMsgT = loadArmT
+		Return
+	EndIf
+	DoLoad()
+End Function
+
+; avvia il ciclo di caricamento: uno script STACCATO (loadgame.sh, via
+; ExecFile) riavvia CSBwin, fa il LOAD dal menu master e rilancia dm3d;
+; questo processo si chiude subito (il mondo va ricostruito da zero, e il
+; riavvio azzera anche i glifi corrotti del bug font)
+Function DoLoad()
+	ExecFile "/bin/sh loadgame.sh " + saveName$
+	Delay 200
+	End
+End Function
+
+; ERR dal bridge mentre aspettavamo l'esito di SAVE/SAVES
+Function SaveError(hdr$)
+	saveWait = 0
+	saveMsg$ = hdr$                           ; es. "ERR badname"
+	saveMsgT = MilliSecs() + 4000
+End Function
+
+; "OK n" drenato dal main loop mentre saveWait > 0
+Function SavesResponse(pn)
+	If saveWait = 1 Then
+		; ack del SAVE: conferma, svuota il campo e rinfresca la lista
+		saveMsg$ = "SALVATO: " + saveName$
+		saveMsgT = MilliSecs() + 3000
+		saveName$ = ""
+		saveWait = 0
+		SavesRequest()
+	ElseIf saveWait = 2 Then
+		saveWait = 0
+		savesN = pn
+		If savesN > 32 Then savesN = 32
+		For i = 0 To savesN-1
+			ln$ = brLine$(i)
+			; campi separati da TAB: nome, data-ora, livello, campioni
+			t1 = Instr(ln$, Chr$(9))
+			t2 = 0 : If t1 > 0 Then t2 = Instr(ln$, Chr$(9), t1+1)
+			t3 = 0 : If t2 > 0 Then t3 = Instr(ln$, Chr$(9), t2+1)
+			If t1 > 0 Then
+				savesName$(i) = Left$(ln$, t1-1)
+			Else
+				savesName$(i) = ln$
+			EndIf
+			; data "2026-07-14 16:16:20" -> "14/07 16:16"
+			d$ = "" : If t2 > 0 Then d$ = Mid$(ln$, t1+1, t2-t1-1)
+			If Len(d$) >= 16 Then
+				savesInfo$(i) = Mid$(d$, 9, 2) + "/" + Mid$(d$, 6, 2) + " " + Mid$(d$, 12, 5)
+			Else
+				savesInfo$(i) = d$
+			EndIf
+			; campioni "IAIDO, MOPHUS" -> "IAIDO +1" (primo nome + quanti altri)
+			ch$ = "" : If t3 > 0 Then ch$ = Mid$(ln$, t3+1)
+			ch$ = Replace$(ch$, ",", " ")
+			nc = 0 : fst$ = ""
+			While ch$ <> ""
+				sp = Instr(ch$, " ")
+				If sp > 0 Then
+					tk$ = Left$(ch$, sp-1) : ch$ = Mid$(ch$, sp+1)
+				Else
+					tk$ = ch$ : ch$ = ""
+				EndIf
+				If tk$ <> "" Then
+					nc = nc + 1
+					If fst$ = "" Then fst$ = tk$
+				EndIf
+			Wend
+			If nc > 1 Then
+				savesChamp$(i) = fst$ + " +" + (nc-1)
+			Else
+				savesChamp$(i) = fst$
+			EndIf
+		Next
+	EndIf
+End Function
+
+; riga della lista sotto il mouse (0..visibili-1), -1 se nessuna
+Function SaveRowAt(mx, my)
+	px0 = INVX0 : py0 = INVY0
+	pw = Int(224*INVSC)
+	n = savesN
+	If n > 10 Then n = 10
+	If mx < px0+14 Or mx >= px0+pw-14 Then Return -1
+	For i = 0 To n-1
+		y1 = py0 + 112 + i*22
+		If my >= y1 And my < y1+22 Then Return i
+	Next
+	Return -1
+End Function
+
+; input del pannello (chiamata OGNI frame dal main loop, prima degli altri
+; widget): tastiera per il nome, click su lista/bottone, chiusura. Quando il
+; pannello e' aperto AZZERA gClick/gClickR: niente passa ai widget sotto.
+Function SaveUI()
+	If savePanel = 0 Then Return
+
+	; tastiera: compone il nome (set ammesso dal bridge: a-z A-Z 0-9 - _)
+	k = GetKey()
+	While k <> 0
+		If k = 13 Then
+			DoSave()
+		ElseIf k = 8 Then
+			If Len(saveName$) > 0 Then saveName$ = Left$(saveName$, Len(saveName$)-1)
+		ElseIf Len(saveName$) < 16 Then
+			; il font DM non ha le minuscole: si memorizza in minuscolo
+			; (nome file) e si DISEGNA in maiuscolo (stile DM)
+			If k >= Asc("A") And k <= Asc("Z") Then k = k + 32
+			ok = 0
+			If k >= Asc("a") And k <= Asc("z") Then ok = 1
+			If k >= Asc("0") And k <= Asc("9") Then ok = 1
+			If k = Asc("-") Or k = Asc("_") Then ok = 1
+			If ok Then saveName$ = saveName$ + Chr$(k)
+		EndIf
+		k = GetKey()
+	Wend
+
+	If gClick > 0 Then
+		mx = MouseX() : my = MouseY()
+		px0 = INVX0 : py0 = INVY0
+		pw = Int(224*INVSC) : ph = Int(136*INVSC)
+		If mx < px0 Or mx >= px0+pw Or my < py0 Or my >= py0+ph Then
+			savePanel = 0                     ; click fuori: chiudi
+		Else
+			; X di chiusura in alto a destra (come l'inventario)
+			If mx >= px0+pw-44 And mx < px0+pw-10 And my >= py0+4 And my < py0+38 Then
+				savePanel = 0
+			; bottoni SALVA e CARICA accanto al campo nome
+			ElseIf mx >= px0+pw-310 And mx < px0+pw-174 And my >= py0+44 And my < py0+74 Then
+				DoSave()
+			ElseIf mx >= px0+pw-150 And mx < px0+pw-14 And my >= py0+44 And my < py0+74 Then
+				LoadClick()
+			Else
+				r = SaveRowAt(mx, my)
+				If r >= 0 Then saveName$ = savesName$(r) : loadArm = 0
+			EndIf
+		EndIf
+	EndIf
+	gClick = 0
+	gClickR = 0
+End Function
+
+; disegno del pannello (chiamato per ULTIMO nel main loop: sopra tutto)
+Function DrawSavePanel()
+	px0 = INVX0 : py0 = INVY0
+	pw = Int(224*INVSC) : ph = Int(136*INVSC)
+
+	; fondo scuro con doppio bordo (stile pannelli DM)
+	Color 12, 12, 12    : Rect px0, py0, pw, ph, True
+	Color 120, 120, 120 : Rect px0, py0, pw, ph, False
+	Color 60, 60, 60    : Rect px0+2, py0+2, pw-4, ph-4, False
+
+	DMText(px0+14, py0+12, "SALVA PARTITA", fntOrange)
+
+	; X di chiusura in alto a destra (come il pannello inventario); il glifo
+	; DM e' largo ~14px nella cella 16: centratura a mano nel box 26x26
+	Color 60, 60, 60    : Rect px0+pw-40, py0+8, 26, 26, True
+	Color 160, 160, 160 : Rect px0+pw-40, py0+8, 26, 26, False
+	DMText(px0+pw-40+6, py0+13, "X", fntGrey)
+
+	; campo nome (in MAIUSCOLO: il font DM non ha le minuscole) con caret
+	; lampeggiante disegnato a Rect (il glifo "_" manca nel font)
+	Color 30, 30, 30    : Rect px0+14, py0+44, pw-330, 30, True
+	Color 140, 140, 140 : Rect px0+14, py0+44, pw-330, 30, False
+	DMText(px0+20, py0+51, Upper$(saveName$), fntGrey)
+	If (MilliSecs()/400) Mod 2 = 0 Then
+		Color 210, 210, 210
+		Rect px0+20 + Int(Len(saveName$)*6*INVSC), py0+65, 12, 3, True
+	EndIf
+
+	; bottone SALVA
+	bx = px0+pw-310
+	Color 34, 56, 34    : Rect bx, py0+44, 136, 30, True
+	Color 140, 190, 140 : Rect bx, py0+44, 136, 30, False
+	DMText(bx + (136 - Int(Len("SALVA")*6*INVSC))/2, py0+51, "SALVA", fntGrey)
+
+	; bottone CARICA (armato = bordo acceso, in attesa del click di conferma)
+	cx = px0+pw-150
+	Color 34, 44, 66    : Rect cx, py0+44, 136, 30, True
+	If loadArm = 1 And MilliSecs() < loadArmT Then
+		Color 255, 220, 120
+	Else
+		Color 140, 160, 200
+	EndIf
+	Rect cx, py0+44, 136, 30, False
+	DMText(cx + (136 - Int(Len("CARICA")*6*INVSC))/2, py0+51, "CARICA", fntGrey)
+
+	; avviso sovrascrittura (nome uguale a un salvataggio esistente)
+	ow = 0
+	For i = 0 To savesN-1
+		If savesName$(i) = saveName$ And saveName$ <> "" Then ow = 1
+	Next
+	If ow Then
+		Color 255, 220, 120
+		Text px0+16, py0+78, "attenzione: sovrascrive il salvataggio esistente"
+	EndIf
+
+	; lista dei salvataggi: nome / data / campioni; hover evidenziato
+	n = savesN
+	If n > 10 Then n = 10
+	mx = MouseX() : my = MouseY()
+	hov = SaveRowAt(mx, my)
+	For i = 0 To n-1
+		y1 = py0 + 112 + i*22
+		If i = hov Then
+			Color 44, 44, 66 : Rect px0+14, y1-2, pw-28, 22, True
+		EndIf
+		DMText(px0+20, y1, Upper$(Left$(savesName$(i), 14)), fntGrey)
+		DMText(px0+270, y1, savesInfo$(i), fntGrey)
+		DMText(px0+470, y1, Upper$(Left$(savesChamp$(i), 8)), fntYellow)
+	Next
+	If savesN > 10 Then
+		Color 160, 160, 160
+		Text px0+16, py0 + 112 + 10*22, "... e altri " + (savesN-10)
+	EndIf
+
+	; esito ultima operazione + istruzioni
+	If saveMsg$ <> "" And MilliSecs() < saveMsgT Then
+		If Left$(saveMsg$, 3) = "ERR" Then
+			DMText(px0+14, py0+ph-52, Upper$(saveMsg$), fntRed)
+		Else
+			DMText(px0+14, py0+ph-52, Upper$(saveMsg$), fntOrange)
+		EndIf
+	EndIf
+	Color 200, 200, 200
+	Text px0+14, py0+ph-22, "INVIO/SALVA salva - click su una riga sceglie, CARICA (2 click) carica - ESC chiude"
+End Function

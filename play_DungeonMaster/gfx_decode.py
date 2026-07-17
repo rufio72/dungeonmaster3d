@@ -36,6 +36,13 @@ FLIPPED  = (8, 10, 28, 33, 34, 35, 37, 38, 39, 42, 43, 44, 45, 46, 47, 48)
 # passo 19, ma la CELLA del marching-order e' 18x13 (wRectPos1454) — il 2D
 # ritaglia il blit alla cella, quindi affettiamo 18x13 per non sbordare.
 SLICES   = {28: (19, 18, 13)}      # (passo, larghezza, altezza)
+# In g28 il color-key del blit 2D (ultimo param di TAG0088b2 = 12) e' il
+# CORPO della figurina, non lo sfondo: il FillRectangle col colore-campione
+# si vede ATTRAVERSO il corpo, mentre lo sfondo cella (indice 0, nero) resta
+# OPACO. La decodifica standard (tkey=0 + COLORKEY 12) bucherebbe entrambi
+# e la figurina resterebbe senza corpo (solo testa/mani/spada): le celle
+# vanno ridecodificate con l'indice giusto trasparente.
+SLICE_TKEY = {28: 12}
 # SCALE2: grafiche usate ANCHE nella colonna destra del viewer (pannello
 # attacco/menu azioni, scala MAGSC=2.0 invece di INVSC=2.75): oltre ai PNG
 # alla scala principale scriviamo g<N>_2.png (e g<N>_2f.png se in FLIPPED)
@@ -163,12 +170,31 @@ def main():
                     cell.save(os.path.join(icdir, "sil_%d_%d.png" % (N - 42, cl)))
         if N in SLICES:
             pitch, cw, ch = SLICES[N]
+            # decodifica DEDICATA (vedi SLICE_TKEY): niente postprocess
+            # COLORKEY, trasparente e' solo l'indice del corpo
+            src = img
+            if N in SLICE_TKEY:
+                src = decode(raw, w, h, stride, pal, SLICE_TKEY[N])
             k = 0
             for x0 in range(0, w - cw + 1, pitch):
-                cell = img.crop((x0, 0, x0 + cw, ch))
-                cell.resize((int(round(cw*scale)), int(round(ch*scale))),
-                            Image.NEAREST).save(
-                    os.path.join(base, "g%dc%d.png" % (N, k)))
+                cell = src.crop((x0, 0, x0 + cw, ch))
+                # Scala NON intera (2.75): il NEAREST puro rende i pixel
+                # disuguali (alcuni 2px, altri 3px) e su figurine minuscole
+                # (18x13) il disegno si deforma. "Sharp scaling": prima un
+                # ingrandimento INTERO nitido (~4x la scala finale), poi
+                # discesa a media d'area (BOX) sulla misura vera; l'alpha
+                # torna binario per non lasciare aloni semi-trasparenti
+                # (DrawImage onora l'alpha del PNG).
+                tw, th = int(round(cw*scale)), int(round(ch*scale))
+                up = int(round(scale*4))
+                big4 = cell.resize((cw*up, ch*up), Image.NEAREST)
+                sm = big4.resize((tw, th), Image.BOX)
+                spx = sm.load()
+                for yy in range(th):
+                    for xx in range(tw):
+                        r2, g2, b2, a2 = spx[xx, yy]
+                        spx[xx, yy] = (r2, g2, b2, 255 if a2 >= 128 else 0)
+                sm.save(os.path.join(base, "g%dc%d.png" % (N, k)))
                 k += 1
         print("g%d %dx%d -> %s" % (N, w, h, os.path.basename(out)))
         n += 1

@@ -435,6 +435,136 @@ Function BuildWallGrate(wx#, wy#, wz#, yaw#)
 End Function
 
 ; =========================================================================
+; =========================================================================
+; MURO CON NICCHIA SCAVATA (altare di Vi T=2, grande alcova T=59)
+; Il vano e' DENTRO il muro: al posto del cubo pieno la cella-muro viene
+; costruita con 5 blocchi (2 fianchi a tutta altezza, architrave sopra,
+; parapetto sotto, tampone di fondo) che lasciano una cavita' rettangolare
+; aperta verso la cella che la guarda. Le fasce esterne in MATTONI usano
+; texture con UV riscalate alla faccia (stessa densita' dei cubi-muro,
+; pattern jambtex); l'INTERNO del vano e' rivestito di pietra liscia, come
+; nel 2D (la grafica g126 dentro mostra pietra puntinata, non mattoni).
+; Pivot al CENTRO della cella-muro con +Z locale FUORI dall'apertura
+; (stessa tabella yaw dei dispositivi: dir0=90 dir1=-90 dir2=0 dir3=180).
+; Per l'altare della rinascita (T=2) il vano e' arredato: bordo-mensola,
+; simbolo di Vi inciso sul fondo, due fiammelle votive verde/gialle.
+; =========================================================================
+
+; texture-muro con UV riscalate alla faccia visibile (hw,hh = mezze
+; dimensioni): stessa densita' di mattoni dei cubi-muro pieni (cfr. jambtex)
+Function WallTexScaled(hw#, hh#)
+	t = LoadTexture("test_new.png")
+	If t = 0 Then Return 0
+	ScaleTexture t, CELL/(2.0*hw), CELL/(2.0*hh)
+	Return t
+End Function
+
+Function BuildNicheWall(cx#, cz#, yaw#, dtype)
+	; dimensioni del vano per tipo
+	If dtype = 2 Then
+		nhw# = 0.78 : ny0# = 0.70 : ny1# = 2.35 : nd# = 1.15   ; altare
+	Else
+		nhw# = 1.15 : ny0# = 0.50 : ny1# = 3.00 : nd# = 1.30   ; alcova grande
+	EndIf
+	piv = CreatePivot()
+	PositionEntity piv, cx, 0, cz
+	RotateEntity piv, 0, yaw, 0
+
+	; ---- guscio esterno in mattoni (texture riscalata per ogni faccia) ----
+	sw# = (CELL/2.0 - nhw)/2.0
+	stx = WallTexScaled(sw, CELL/2.0)              ; fasce laterali strette
+	For s = -1 To 1 Step 2
+		bx = CreateCube(piv)
+		ScaleEntity bx, sw, CELL/2.0, CELL/2.0
+		PositionEntity bx, s*(nhw+sw), CELL/2.0, 0
+		EntityColor bx, 255, 255, 255
+		If stx <> 0 Then EntityTexture bx, stx, 0, 0
+	Next
+	atx = WallTexScaled(nhw, (CELL-ny1)/2.0)       ; architrave sopra il vano
+	bx = CreateCube(piv)
+	ScaleEntity bx, nhw, (CELL-ny1)/2.0, CELL/2.0
+	PositionEntity bx, 0, (CELL+ny1)/2.0, 0
+	EntityColor bx, 255, 255, 255
+	If atx <> 0 Then EntityTexture bx, atx, 0, 0
+	ptx = WallTexScaled(nhw, ny0/2.0)              ; parapetto sotto il vano
+	bx = CreateCube(piv)
+	ScaleEntity bx, nhw, ny0/2.0, CELL/2.0
+	PositionEntity bx, 0, ny0/2.0, 0
+	EntityColor bx, 255, 255, 255
+	If ptx <> 0 Then EntityTexture bx, ptx, 0, 0
+	; tampone dietro (la sua faccia visibile la copre il rivestimento)
+	bd# = (CELL - nd)/2.0
+	bx = CreateCube(piv)
+	ScaleEntity bx, nhw, (ny1-ny0)/2.0, bd
+	PositionEntity bx, 0, (ny0+ny1)/2.0, -nd/2.0
+	EntityColor bx, 100, 100, 104
+
+	; ---- rivestimento interno: pietra liscia (niente mattoni stirati) ----
+	zmid# = CELL/2.0 - nd/2.0
+	For s = -1 To 1 Step 2                         ; fianchi interni
+		pnl = CreateCube(piv)
+		ScaleEntity pnl, 0.015, (ny1-ny0)/2.0, nd/2.0
+		PositionEntity pnl, s*(nhw-0.015), (ny0+ny1)/2.0, zmid
+		EntityColor pnl, 105, 105, 109
+	Next
+	pnl = CreateCube(piv)                          ; cielo del vano
+	ScaleEntity pnl, nhw, 0.015, nd/2.0
+	PositionEntity pnl, 0, ny1-0.015, zmid
+	EntityColor pnl, 82, 82, 86
+	pnl = CreateCube(piv)                          ; piano del vano
+	ScaleEntity pnl, nhw, 0.015, nd/2.0
+	PositionEntity pnl, 0, ny0+0.015, zmid
+	EntityColor pnl, 122, 122, 126
+	zback# = CELL/2.0 - nd                         ; fondo del vano
+	pnl = CreateCube(piv)
+	ScaleEntity pnl, nhw, (ny1-ny0)/2.0, 0.015
+	PositionEntity pnl, 0, (ny0+ny1)/2.0, zback+0.015
+	EntityColor pnl, 100, 100, 104
+
+	If dtype <> 2 Then Return
+
+	; ------- arredo dell'ALTARE DELLA RINASCITA -------
+	; bordo-mensola sul davanti del piano (dove si depongono le ossa)
+	lp = CreateCube(piv)
+	ScaleEntity lp, nhw, 0.05, 0.08
+	PositionEntity lp, 0, ny0+0.05, CELL/2.0-0.08
+	EntityColor lp, 175, 175, 179
+
+	; simbolo di Vi inciso in alto sul fondo: targhetta scura + due onde
+	tq = CreateCube(piv)
+	ScaleEntity tq, 0.30, 0.16, 0.010
+	PositionEntity tq, 0, ny1-0.42, zback+0.042
+	EntityColor tq, 96, 96, 100
+	For s = -1 To 1 Step 2
+		onda = CreateCube(piv)
+		ScaleEntity onda, 0.16, 0.022, 0.008
+		PositionEntity onda, 0, ny1-0.42 + s*0.055, zback+0.055
+		RotateEntity onda, 0, 0, s*12
+		EntityColor onda, 225, 225, 228
+	Next
+
+	; fiammelle votive sui fianchi interni del vano (autoilluminate)
+	For s = -1 To 1 Step 2
+		fb = CreateSphere(8, piv)
+		ScaleEntity fb, 0.06, 0.05, 0.05
+		PositionEntity fb, s*(nhw-0.14), ny0+0.75, zback + nd*0.45
+		EntityColor fb, 60, 200, 60
+		EntityFX fb, 1
+		fc = CreateCone(8, True, piv)
+		ScaleEntity fc, 0.05, 0.10, 0.05
+		PositionEntity fc, s*(nhw-0.24), ny0+0.79, zback + nd*0.45
+		RotateEntity fc, 0, 0, s*65        ; punta inclinata verso il centro
+		EntityColor fc, 250, 235, 60
+		EntityFX fc, 1
+		gt = CreateSphere(8, piv)
+		ScaleEntity gt, 0.02, 0.026, 0.02
+		PositionEntity gt, s*(nhw-0.17), ny0+0.66, zback + nd*0.45
+		EntityColor gt, 200, 40, 30
+		EntityFX gt, 1
+	Next
+End Function
+
+; =========================================================================
 ; OGGETTI A TERRA (dinamici: si raccolgono e si posano)
 ; Il payload FLOOR/FLOORP e' gia' in brLine$: count, poi 6 righe per oggetto
 ; (x / y / pos / dbType / objNI / nome). Ricostruisce DA ZERO i decal piatti:

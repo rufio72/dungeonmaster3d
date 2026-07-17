@@ -42,7 +42,7 @@ for line in open("buttons/buttons.txt"):
 
 os.makedirs("walldec", exist_ok=True)
 done = 0
-for T in range(0, 58):
+for T in range(0, 67):                      # raws fino a g255 -> T max 66
     N = 121 + 2*T + 1                       # variante near
     if N not in dims: continue
     w, h, stride = dims[N]

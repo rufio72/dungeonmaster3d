@@ -40,33 +40,9 @@ Function BuildWoodDoor(cx#, cz#, thinX)
 	EntityColor slab, 150, 110, 70
 	If woodtex <> 0 Then EntityTexture slab, woodtex
 
-	For bi = 0 To 2
-		ly# = (bi-1) * (DOOR_H*0.62)            ; offset LOCALE in Y rispetto al pivot
-		band = CreateCube()
-		EntityParent band, piv
-		If thinX Then
-			ScaleEntity band, DOOR_T*1.25, DOOR_H*0.10, DOOR_W*1.01
-		Else
-			ScaleEntity band, DOOR_W*1.01, DOOR_H*0.10, DOOR_T*1.25
-		EndIf
-		PositionEntity band, 0, ly, 0
-		EntityColor band, 60, 62, 70
-
-		For si = -2 To 2
-			stud = CreateCube()
-			EntityParent stud, piv
-			sd# = DOOR_T*0.55
-			off# = si * (DOOR_W*0.40)
-			If thinX Then
-				ScaleEntity stud, DOOR_T*1.5, sd, sd
-				PositionEntity stud, 0, ly, off
-			Else
-				ScaleEntity stud, sd, sd, DOOR_T*1.5
-				PositionEntity stud, off, ly, 0
-			EndIf
-			EntityColor stud, 170, 172, 185
-		Next
-	Next
+	; anta LISCIA: niente bande di ferro ne' borchie (nel 2D la porta di legno
+	; e' solo assi verticali di legno; bande e cubetti leggevano come corpi
+	; estranei — richiesta utente). Il dettaglio lo fa la texture del legno.
 
 	Return piv
 End Function
@@ -252,6 +228,56 @@ Function BuildDoorFrame(cx#, cz#, thinX)
 	Next
 End Function
 
+; ------------------------------------------------- pomello della porta (switch)
+; Le porte con doorSwitch (bit 6 del record DB0) hanno il POMELLO marrone che
+; le apre/chiude. Nel 2D (DrawDoorSwitch) sta SEMPRE a destra del viewport:
+; in mondo quindi sta su stipiti OPPOSTI a seconda del lato di approccio
+; (diagonale). Per ogni lato: piastra scura + pomello marrone sulla faccia del
+; palo rivolta a chi arriva. STATICI (non sul pivot che scorre) e PICKABILI:
+; EntityName "doorbtn", il main loop su click manda "DOORBTN" al bridge, che
+; inietta il click 2D sulla regione del pomello (guardie e TT_DOOR nel motore).
+; s = lato di approccio lungo l'asse del varco; il palo "a destra" guardando
+; la porta da quel lato risulta dal prodotto vettore avanti x su.
+Function BuildDoorButtons(cx#, cz#, thinX)
+	pw# = 0.27                          ; mezza larghezza palo (come BuildDoorFrame)
+	dp# = DOOR_T * 1.5                  ; mezza profondita' palo
+	po# = CELL/2.0 - pw                 ; centro palo dal centro cella
+	by# = 2.2                           ; quota pomello (poco sopra la mezzeria)
+	For s = -1 To 1 Step 2
+		If thinX Then
+			; varco est-ovest: Blitz3D e' LEFT-handed (mondo riflesso su X),
+			; quindi da +X guardando -X la destra a schermo e' +Z (e viceversa)
+			px1# = cx + s*(dp + 0.030) : pz1# = cz + s*po      ; piastra
+			px2# = cx + s*(dp + 0.075) : pz2# = pz1           ; pomello
+		Else
+			; varco nord-sud: da +Z guardando -Z la destra a schermo e' -X
+			px1# = cx - s*po : pz1# = cz + s*(dp + 0.030)
+			px2# = px1       : pz2# = cz + s*(dp + 0.075)
+		EndIf
+		plt = CreateCube()                                 ; piastra scura di fondo
+		If thinX Then
+			ScaleEntity plt, 0.030, 0.14, 0.11
+		Else
+			ScaleEntity plt, 0.11, 0.14, 0.030
+		EndIf
+		PositionEntity plt, px1, by, pz1
+		EntityColor plt, 58, 36, 16
+		EntityPickMode plt, 3
+		NameEntity plt, "doorbtn"
+		kb = CreateCube()                                  ; pomello marrone
+		If thinX Then
+			ScaleEntity kb, 0.065, 0.075, 0.062
+		Else
+			ScaleEntity kb, 0.062, 0.075, 0.065
+		EndIf
+		PositionEntity kb, px2, by, pz2
+		EntityColor kb, 148, 82, 30
+		EntityShininess kb, 0.1
+		EntityPickMode kb, 3
+		NameEntity kb, "doorbtn"
+	Next
+End Function
+
 ; =========================================================================
 ; GANCIO DA MURO IN GEOMETRIA 3D (decorazione murale DM tipo 4)
 ; Nel 2D e' la grafica g130: placca di ottone inchiodata al muro con 4
@@ -385,6 +411,97 @@ Function BuildWallRing(wx#, wy#, wz#, yaw#)
 		RotateEntity sg, 0, 0, a                   ; asse Y del cilindro = tangente
 		EntityColor sg, 40, 41, 46
 		EntityShininess sg, 0.25
+	Next
+End Function
+
+; anello/arco di ferro generico: nseg segmenti-cilindro sul piano XY del
+; sotto-pivot restituito (aspan=360 -> anello chiuso; meno -> arco aperto,
+; es. i ceppi). Chi chiama posiziona/ruota il pivot e vi appende dettagli.
+Function BuildIronArc(parent, rad#, tube#, a0#, aspan#, nseg, cr, cg, cb, shin#)
+	tp = CreatePivot(parent)
+	For k = 0 To nseg-1
+		a# = a0 + aspan * (k + 0.5) / nseg
+		; mezzo-segmento = mezza corda con margine: niente buchi tra i pezzi
+		hl# = rad * Sin(aspan / nseg / 2.0) * 1.25 + tube * 0.4
+		sg = CreateCylinder(8, True, tp)
+		ScaleEntity sg, tube, hl, tube
+		PositionEntity sg, rad*Cos(a), rad*Sin(a), 0
+		RotateEntity sg, 0, 0, a                   ; asse Y del cilindro = tangente
+		EntityColor sg, cr, cg, cb
+		EntityShininess sg, shin
+	Next
+	Return tp
+End Function
+
+; =========================================================================
+; MANETTE DEL PRIGIONIERO IN GEOMETRIA 3D (dispositivo murale DM tipo 36)
+; Nel 2D e' la grafica g194: una TAVOLA di legno inchiodata al muro con due
+; chiodi tondi; ai bordi due STAFFE d'acciaio da cui pendono CATENE che
+; finiscono in CEPPI aperti di ferro scuro arrugginito. Stesso schema di
+; gancio/anello/grata: pivot sulla superficie del muro con +Z locale che
+; punta FUORI dal muro, figli in coordinate LOCALI, wy = mezzeria (EYE).
+; Catena = anelli pieni alternati (frontale/di taglio, come una catena vera);
+; ceppo = arco aperto in basso (BuildIronArc) con le punte a sferetta.
+; =========================================================================
+Function BuildWallManacles(wx#, wy#, wz#, yaw#)
+	piv = CreatePivot()
+	PositionEntity piv, wx, wy, wz
+	RotateEntity piv, 0, yaw, 0
+	; tutta la decorazione e' +40% (i figli ereditano la scala del pivot)
+	ScaleEntity piv, 1.4, 1.4, 1.4
+
+	; TAVOLA di legno orizzontale (in alto: le catene pendono sotto)
+	pl = CreateCube(piv)
+	ScaleEntity pl, 1.00, 0.155, 0.045
+	PositionEntity pl, 0, 0.55, 0.055
+	EntityColor pl, 88, 44, 14
+
+	; 2 CHIODI tondi sulla faccia della tavola (tra le staffe, come nel 2D)
+	For i = 0 To 1
+		nx# = 0.38 : If i = 1 Then nx = -0.38
+		na = CreateSphere(8, piv)
+		ScaleEntity na, 0.030, 0.030, 0.018
+		PositionEntity na, nx, 0.55, 0.104
+		EntityColor na, 168, 168, 172
+		EntityShininess na, 0.4
+	Next
+
+	; per ciascun lato: staffa + ribattino + catena + ceppo
+	For sd = 0 To 1
+		s# = 1.0 : If sd = 1 Then s = -1.0
+
+		; STAFFA di ferro scuro verticale (avvolge la tavola, sporge sopra e
+		; sotto; nessun chiodo/ribattino, e' liscia)
+		br = CreateCube(piv)
+		ScaleEntity br, 0.075, 0.215, 0.014
+		PositionEntity br, s*0.72, 0.55, 0.114
+		EntityColor br, 104, 104, 112
+		EntityShininess br, 0.3
+
+		; CATENA: 6 maglie intrecciate, alternate frontale/di taglio; la prima
+		; maglia AGGANCIA LA META' della staffa (appena davanti alla sua
+		; faccia, cosi' si vede l'anello di attacco senza z-fight)
+		For L = 0 To 5
+			lk = BuildIronArc(piv, 0.055, 0.016, 0, 360, 8, 132, 132, 138, 0.3)
+			PositionEntity lk, s*0.72, 0.50 - L*0.115, 0.132
+			If (L And 1) Then RotateEntity lk, 0, 90, 0   ; maglia di taglio
+		Next
+
+		; CEPPO aperto: arco di ferro scuro arrugginito con l'apertura in
+		; BASSO (manetta aperta); ben piu' SPESSO delle maglie della catena
+		; (e' una fascia di ferro battuto, non un anello di catena)
+		mn = BuildIronArc(piv, 0.16, 0.042, -35, 250, 7, 62, 50, 40, 0.15)
+		PositionEntity mn, s*0.72, -0.285, 0.150
+		RotateEntity mn, 8, s*20, s*8
+		; punte a sferetta alle due estremita' aperte dell'arco
+		For k = 0 To 1
+			ae# = -35 : If k = 1 Then ae = 215
+			tp2 = CreateSphere(8, mn)
+			ScaleEntity tp2, 0.048, 0.048, 0.048
+			PositionEntity tp2, 0.16*Cos(ae), 0.16*Sin(ae), 0
+			EntityColor tp2, 62, 50, 40
+			EntityShininess tp2, 0.15
+		Next
 	Next
 End Function
 
@@ -577,6 +694,10 @@ End Function
 ; della nebbia, quindi ricostruire tutto a ogni refresh non si nota mai.
 ; =========================================================================
 Function BuildFloorObjs(w, h)
+	; l'eventuale oggetto-bersaglio del lancio sta per essere liberato col
+	; resto: scollega il riferimento (verra' ri-agganciato per key piu' sotto
+	; se l'oggetto e' ancora a terra; senno' il proiettile svanira' a vuoto)
+	prjTgtEnt = 0
 	For i = 0 To floN-1
 		If floEnt(i) <> 0 Then FreeEntity floEnt(i)
 		floEnt(i) = 0
@@ -588,7 +709,8 @@ Function BuildFloorObjs(w, h)
 		fx = Int(brLine$(k))
 		fy = Int(brLine$(k+1))
 		fp = Int(brLine$(k+2)) And 3
-		ni = Int(brLine$(k+4))          ; k+3 = dbType, k+5 = nome (non servono)
+		ni = Int(brLine$(k+4))          ; k+3 = dbType (non serve)
+		nm$ = brLine$(k+5)              ; nome motore ("APPLE", "BREAD", ...)
 		k = k + 6
 		ok = (floN < FLOBJ_MAX And fx >= 0 And fx < w And fy >= 0 And fy < h And ni >= 0 And ni <= 255)
 		; le celle-MURO contengono oggetti "invisibili" (es. l'equipaggiamento
@@ -597,17 +719,9 @@ Function BuildFloorObjs(w, h)
 			If Mid$(grid$(fy), fx+1, 1) = "0" Then ok = 0
 		EndIf
 		If ok Then
-			If floTex(ni) = 0 Then
-				; asset EDITABILE: la versione ridipinta a mano vince sempre
-				cust$ = "floorobj/ni" + ni + "_custom.png"
-				If FileType(cust$) = 1 Then
-					floTex(ni) = LoadTexture(cust$, 2)              ; flag 2 = alpha
-				Else
-					floTex(ni) = LoadTexture("floorobj/ni" + ni + ".png", 2)
-				EndIf
-				; PNG top-left vs campionamento GL bottom-left (flip delle targhe)
-				If floTex(ni) <> 0 Then ScaleTexture floTex(ni), 1, -1
-			EndIf
+			; mesh vera se disponibile (floorobj/ni<NI>.b3d o procedurale
+			; mela/pane); 0 = si ricade sul billboard con l'icona 2D
+			proto = FloorObjProto(ni, nm$)
 			; quadrante -> offset dal centro cella (nord = -Z, ovest = +X)
 			q# = CELL*0.25
 			dxo# = q : If fp = 1 Or fp = 2 Then dxo = -q
@@ -618,18 +732,290 @@ Function BuildFloorObjs(w, h)
 			For j = 0 To floN-1
 				If floKey(j) = key Then lift = lift + 1
 			Next
-			e = CreateCube()
-			ScaleEntity e, FLOBJ_HW, 0.01, FLOBJ_HW
-			; base a ~0.19: sopra l'erba (top 0.15) e sopra la lastra delle
-			; pedane (top ~0.179), cosi' un oggetto posato su una pedana si vede
-			PositionEntity e, (w-1-fx)*CELL + dxo, 0.20 + lift*0.025, fy*CELL + dzo
-			EntityColor e, 255, 255, 255
-			If floTex(ni) <> 0 Then EntityTexture e, floTex(ni)
+			If proto <> 0 Then
+				; istanza della mesh: origine alla BASE, appoggiata alla stessa
+				; quota dei billboard (0.18: sopra erba e pedane). Yaw FISSO
+				; pseudo-casuale da cella+quadrante (varieta' tra le istanze;
+				; il main loop NON la ruota verso la camera: floIsMesh=1)
+				e = CopyEntity(proto)
+				ShowEntity e
+				RotateEntity e, 0, (fx*73 + fy*131 + fp*47) Mod 360, 0
+				PositionEntity e, (w-1-fx)*CELL + dxo + lift*0.02, 0.18 + lift*0.06, fy*CELL + dzo + lift*0.02
+				floIsMesh(floN) = 1
+				; raccolta col click: pickabile, nome = cella+quadrante
+				EntityPickMode e, 3
+				NameEntity e, "flobj:" + fx + ":" + fy + ":" + fp
+			Else
+				If floTex(ni) = 0 Then
+					; asset EDITABILE: la versione ridipinta a mano vince sempre
+					cust$ = "floorobj/ni" + ni + "_custom.png"
+					If FileType(cust$) = 1 Then
+						floTex(ni) = LoadTexture(cust$, 2)              ; flag 2 = alpha
+					Else
+						floTex(ni) = LoadTexture("floorobj/ni" + ni + ".png", 2)
+					EndIf
+					; PNG top-left vs campionamento GL bottom-left (flip delle targhe)
+					If floTex(ni) <> 0 Then ScaleTexture floTex(ni), 1, -1
+				EndIf
+				e = CreateCube()
+				; lastra VERTICALE stile sprite DM (in piedi, non stesa): il main
+				; loop la tiene ruotata verso la camera (billboard ad asse Y).
+				; Gli impilati salgono e slittano un filo in diagonale (niente
+				; piani complanari in z-fight).
+				; meta' del decal steso di prima (richiesta utente: -50%)
+				fhw# = FLOBJ_HW * 0.5
+				ScaleEntity e, fhw, fhw, 0.01
+				; base a ~0.18: sopra l'erba (top 0.15) e sopra la lastra delle
+				; pedane (top ~0.179), cosi' un oggetto posato su una pedana si vede
+				PositionEntity e, (w-1-fx)*CELL + dxo + lift*0.02, 0.18 + fhw + lift*0.06, fy*CELL + dzo + lift*0.02
+				EntityColor e, 255, 255, 255
+				If floTex(ni) <> 0 Then EntityTexture e, floTex(ni)
+				floIsMesh(floN) = 0
+				; raccolta col click: pickabile, nome = cella+quadrante
+				EntityPickMode e, 3
+				NameEntity e, "flobj:" + fx + ":" + fy + ":" + fp
+			EndIf
+			; proiettile in volo: se questo e' l'oggetto ATTERRATO del lancio
+			; (stesso NI, avanti lungo la traiettoria, corsia giusta), resta
+			; nascosto finche' il proiettile non arriva li' (ThrowProjEnd lo
+			; mostra). Il rebuild rilega per key: le entity cambiano a ogni
+			; refresh ma la cella+quadrante d'atterraggio no.
+			If prjEnt <> 0 And ni = prjNI Then
+				exw# = EntityX(e) : ezw# = EntityZ(e)
+				fwd# = (exw - prjSX)*prjDX + (ezw - prjSZ)*prjDZ
+				lat# = Abs((exw - prjSX)*prjDZ - (ezw - prjSZ)*prjDX)
+				If fwd > CELL*0.4 And lat < CELL*0.8 Then
+					If prjTgt = 0 Or key = prjTgtKey Then
+						prjTgt = 1
+						prjTgtKey = key
+						prjTgtEnt = e
+						prjTX = exw : prjTY = EntityY(e) : prjTZ = ezw
+						HideEntity e
+					EndIf
+				EndIf
+			EndIf
 			floKey(floN) = key
 			floEnt(floN) = e
 			floN = floN + 1
 		EndIf
 	Next
+End Function
+
+; ------------------------------------------------- lancio: proiettile 3D
+; texture dell'oggetto a terra per objNI, caricata pigramente (stessa logica
+; e stessa cache floTex() di BuildFloorObjs; _custom.png vince sempre).
+Function FloorObjTex(ni)
+	If ni < 0 Or ni > 255 Then Return 0
+	If floTex(ni) = 0 Then
+		cust$ = "floorobj/ni" + ni + "_custom.png"
+		If FileType(cust$) = 1 Then
+			floTex(ni) = LoadTexture(cust$, 2)
+		Else
+			floTex(ni) = LoadTexture("floorobj/ni" + ni + ".png", 2)
+		EndIf
+		If floTex(ni) <> 0 Then ScaleTexture floTex(ni), 1, -1
+	EndIf
+	Return floTex(ni)
+End Function
+
+; chiamata al CLICK di lancio: memorizza NI, punto di partenza (davanti al
+; party, spostato sulla corsia sx/dx come nel 2D) e direzione mondo. Il
+; proiettile parte solo quando lo STATE conferma la mano svuotata (il motore
+; puo' rifiutare il lancio: porta, peso, HandChar).
+; Versori (verificati col pomello): N: avanti -Z, destra -X; E: avanti -X,
+; destra +Z; S: avanti +Z, destra +X; W: avanti +X, destra -Z.
+Function ThrowPrep(side, ppx, ppy, ppf, w)
+	fx# = 0 : fz# = 0 : rxw# = 0 : rzw# = 0
+	If ppf = 0 Then fz = -1 : rxw = -1
+	If ppf = 1 Then fx = -1 : rzw = 1
+	If ppf = 2 Then fz = 1 : rxw = 1
+	If ppf = 3 Then fx = 1 : rzw = -1
+	s# = -CELL*0.22 : If side = 1 Then s = CELL*0.22
+	prjPendNI = hcHandNI
+	prjPendMs = MilliSecs()
+	prjPendX = (w-1-ppx)*CELL + fx*CELL*0.3 + rxw*s
+	prjPendZ = ppy*CELL + fz*CELL*0.3 + rzw*s
+	prjPendDX = fx : prjPendDZ = fz
+End Function
+
+; spawn del proiettile (mano appena svuotata): mesh vera se disponibile,
+; altrimenti billboard con l'icona, come gli oggetti a terra.
+Function SpawnThrowProj()
+	If prjEnt <> 0 Then ThrowProjEnd()       ; un proiettile alla volta
+	ni = prjPendNI
+	nm$ = ""
+	If ni >= 0 And ni <= 255 Then nm$ = objName$(ni)
+	proto = FloorObjProto(ni, nm$)
+	If proto <> 0 Then
+		prjEnt = CopyEntity(proto)
+		ShowEntity prjEnt
+		prjIsMesh = 1
+	Else
+		prjEnt = CreateCube()
+		fhw# = FLOBJ_HW * 0.5
+		ScaleEntity prjEnt, fhw, fhw, 0.01
+		EntityColor prjEnt, 255, 255, 255
+		t = FloorObjTex(ni)
+		If t <> 0 Then EntityTexture prjEnt, t
+		prjIsMesh = 0
+	EndIf
+	prjNI = ni
+	prjX = prjPendX : prjY = 1.5 : prjZ = prjPendZ
+	prjSX = prjPendX : prjSZ = prjPendZ
+	prjDX = prjPendDX : prjDZ = prjPendDZ
+	prjMs = MilliSecs()
+	prjTgt = 0 : prjTgtKey = -1 : prjTgtEnt = 0
+	PositionEntity prjEnt, prjX, prjY, prjZ
+End Function
+
+; fine volo: mostra l'oggetto vero (tenuto nascosto da BuildFloorObjs) e
+; libera il proiettile. Usata anche per i timeout (atterraggio mai visto).
+Function ThrowProjEnd()
+	If prjTgtEnt <> 0 Then ShowEntity prjTgtEnt
+	If prjEnt <> 0 Then FreeEntity prjEnt
+	prjEnt = 0 : prjNI = -1
+	prjTgt = 0 : prjTgtKey = -1 : prjTgtEnt = 0
+End Function
+
+; ------------------------------------------------- raccolta: quadrante->regione
+; Converte l'oggetto cliccato (cella fx,fy + quadrante assoluto fp: 0=NW 1=NE
+; 2=SE 3=SW; griglia x=est y=sud) nella REGIONE del viewport 2D che TAG01a148
+; usa per raccogliere: 0/1 = cella del party sx/dx, 2/3 = cella davanti sx/dx.
+; -1 = fuori portata (regola DM: solo propria cella e cella davanti).
+; "Destra a schermo" = facing ruotato N->E, E->S, S->W, W->N: verificato
+; empiricamente col pomello porta (mondo specchiato su X + left-handed di
+; Blitz3D si annullano: vale l'intuizione da mappa).
+; ppx/ppy/ppf = posizione e facing del party PASSATI Dal chiamante: px/py/pf
+; del main NON sono Global (le funzioni li ricevono sempre come parametro,
+; vedi DrawHUD(pf)) e dentro una Function varrebbero 0.
+Function FloorPickRegion(fx, fy, fp, ppx, ppy, ppf)
+	dx = 0 : dy = 0
+	If ppf = 0 Then dy = -1
+	If ppf = 1 Then dx = 1
+	If ppf = 2 Then dy = 1
+	If ppf = 3 Then dx = -1
+	base = -1
+	If fx = ppx And fy = ppy Then base = 0
+	If fx = ppx + dx And fy = ppy + dy Then base = 2
+	If base < 0 Then Return -1
+	; offset del quadrante dal centro cella (griglia)
+	ox = -1 : If fp = 1 Or fp = 2 Then ox = 1
+	oy = -1 : If fp = 2 Or fp = 3 Then oy = 1
+	; versore "destra" nel piano griglia
+	rx = 0 : ry = 0
+	If ppf = 0 Then rx = 1
+	If ppf = 1 Then ry = 1
+	If ppf = 2 Then rx = -1
+	If ppf = 3 Then ry = -1
+	If ox*rx + oy*ry > 0 Then Return base + 1
+	Return base
+End Function
+
+; =========================================================================
+; OGGETTI A TERRA IN VERA GEOMETRIA 3D (mela, pane, ...)
+; Prototipo NASCOSTO per objNI, istanziato con CopyEntity a ogni refresh
+; (BuildFloorObjs ricostruisce tutto da zero: i prototipi sopravvivono).
+; Precedenza: floorobj/ni<NI>.b3d (modellato a mano, asset EDITABILE) ->
+; procedurale per nome motore -> 0 = billboard classico con l'icona 2D.
+; CONVENZIONE: origine del prototipo alla BASE (appoggia sulla y passata a
+; PositionEntity); CopyEntity copia l'intera gerarchia (picciolo incluso).
+; Anche i tentativi falliti restano in cache (floMeshTry): niente FileType
+; ripetuti a ogni refresh del pavimento.
+; =========================================================================
+Function FloorObjProto(ni, nome$)
+	If ni < 0 Or ni > 255 Then Return 0
+	If floMeshTry(ni) Then Return floMeshP(ni)
+	m = 0
+	f$ = "floorobj/ni" + ni + ".b3d"
+	If FileType(f$) = 1 Then m = LoadMesh(f$)
+	If m = 0 Then
+		n$ = Upper$(Trim$(nome$))
+		; nome ignoto (chiamante senza payload): NON cacheare il "no",
+		; ritenta quando il nome arrivera' (altrimenti un solo tentativo
+		; a vuoto condannerebbe quell'NI al billboard per sempre)
+		If n$ = "" Then Return 0
+		If n$ = "APPLE" Then m = BuildAppleMesh()
+		If n$ = "BREAD" Then m = BuildBreadMesh()
+	EndIf
+	floMeshTry(ni) = 1
+	If m <> 0 Then HideEntity m
+	floMeshP(ni) = m
+	Return m
+End Function
+
+; mela stilizzata: sfera deformata a profilo-mela (corpo schiacciato, fossette
+; ai poli) + picciolo cilindrico inclinato. ~130 triangoli, ingombro ~0.48
+; unita' (CELL=4 -> ~12% del tile), come l'icona billboard che sostituisce.
+Function BuildAppleMesh()
+	m = CreateSphere(8)
+	s = GetSurface(m, 1)
+	For v = 0 To CountVertices(s)-1
+		vx# = VertexX(s, v) : vy# = VertexY(s, v) : vz# = VertexZ(s, v)
+		rr# = Sqr(vx*vx + vz*vz)             ; 0 ai poli, 1 all'equatore
+		; la quota pesata dal raggio orizzontale scava i poli (fossette)
+		VertexCoords s, v, vx, vy*(0.62 + 0.33*rr), vz
+	Next
+	ScaleMesh m, 0.24, 0.24, 0.24
+	UpdateNormals m
+	; origine alla base + quota della cima (per piazzare il picciolo)
+	miny# = 0 : topy# = 0
+	For v = 0 To CountVertices(s)-1
+		If VertexY(s, v) < miny Then miny = VertexY(s, v)
+		If VertexY(s, v) > topy Then topy = VertexY(s, v)
+	Next
+	PositionMesh m, 0, -miny, 0
+	topy = topy - miny
+	EntityColor m, 192, 32, 26               ; rosso mela
+	st = CreateCylinder(6, 1, m)             ; picciolo bruno nella fossetta
+	ScaleEntity st, 0.022, 0.075, 0.022
+	PositionEntity st, 0.025, topy + 0.03, 0
+	RotateEntity st, 0, 0, 14
+	EntityColor st, 92, 62, 34
+	Return m
+End Function
+
+; pane "pan carre'" come lo sprite 2D di DM: mattoncino dai bordi arrotondati
+; (superellissoide: sfera coi componenti elevati a potenza <1 spinge i punti
+; verso le facce di un cubo morbido), fondo tagliato piatto, crosta bruna.
+Function BuildBreadMesh()
+	m = CreateSphere(8)
+	s = GetSurface(m, 1)
+	For v = 0 To CountVertices(s)-1
+		vx# = VertexX(s, v) : vy# = VertexY(s, v) : vz# = VertexZ(s, v)
+		nx# = Sgn(vx) * Abs(vx)^0.45
+		ny# = Sgn(vy) * Abs(vy)^0.45
+		nz# = Sgn(vz) * Abs(vz)^0.45
+		If ny < -0.82 Then ny = -0.82        ; fondo piatto: appoggia bene
+		VertexCoords s, v, nx, ny, nz
+	Next
+	ScaleMesh m, 0.26, 0.105, 0.145          ; filoncino: lungo (X), basso (Y)
+	UpdateNormals m
+	miny# = 0
+	For v = 0 To CountVertices(s)-1
+		If VertexY(s, v) < miny Then miny = VertexY(s, v)
+	Next
+	PositionMesh m, 0, -miny, 0              ; origine alla base
+	EntityColor m, 105, 54, 24               ; crosta bruna scura (la torcia scalda)
+	; semini chiari sul dorso: mini-sfere FIGLIE sparse in modo deterministico
+	; (seni come hash). Figli = colore proprio ma stessa luce; CopyEntity in
+	; BuildFloorObjs copia l'intera gerarchia, semini compresi.
+	For i = 1 To 16
+		sx# = Sin(i*57.3) * 0.75
+		sz# = Sin(i*93.7 + 40) * 0.72
+		; quota ESATTA del dorso: inverto la mappa superellissoide (potenza
+		; 1/0.45) per tornare alla sfera, poi rimappo la y con la potenza 0.45
+		px# = Abs(sx) ^ (1.0/0.45)
+		pz# = Abs(sz) ^ (1.0/0.45)
+		pq# = 1.0 - px*px - pz*pz
+		If pq < 0 Then pq = 0
+		yu# = Sqr(pq) ^ 0.45
+		sd = CreateSphere(4, m)
+		ScaleEntity sd, 0.013, 0.007, 0.009
+		PositionEntity sd, sx*0.26, yu*0.105 + (-miny) - 0.003, sz*0.145
+		RotateEntity sd, 0, i*39, 0
+		EntityColor sd, 238, 222, 190
+	Next
+	Return m
 End Function
 
 ; ------------------------------------------------------------------- scale 3D

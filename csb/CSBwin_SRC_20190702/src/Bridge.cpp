@@ -957,6 +957,15 @@ static const char *ObjNameSafe(int objNI)
   return (s != NULL) ? s : "?";
 }
 
+// ---- nomi oggetto per objectNameIndex (0..198) ------------------------------
+// Il viewer 3D li usa per scegliere la mesh procedurale (mela, pane, ...)
+// anche per oggetti MAI visti a terra (es. lanciati dall'inventario).
+static void EmitObjNamesText(FILE *f)
+{
+  fprintf(f, "199\n");
+  for (int i = 0; i < 199; i++) fprintf(f, "%s\n", ObjNameSafe(i));
+}
+
 static void EmitFloorText(FILE *f)
 {
   int px = d.partyX, py = d.partyY;
@@ -1335,6 +1344,7 @@ static int   bridgeDoorLevel = -999;   // livello a cui si riferisce la cache
 static int   bridgeDoorCount = 0;
 static short bridgeDoorX[512], bridgeDoorY[512], bridgeDoorType[512];
 static short bridgeDoorOrn[512];       // ornateness() 0..15 (decoro per-porta: grata, ecc.)
+static short bridgeDoorSw[512];        // doorSwitch() (bit 6: pomello che apre/chiude)
 
 static void BuildDoorCache(void)
 {
@@ -1344,17 +1354,23 @@ static void BuildDoorCache(void)
     for (int x = 0; x < W && bridgeDoorCount < 512; x++)
     {
       if (((GetCellFlags(x, y) >> 5) & 7) != roomDOOR) continue;
-      int type = 0, orn = 0;
+      int type = 0, orn = 0, sw = 0;
       RN dn = FindFirstDoor(x, y);
       if (dn != RNeof)
       {
         DB0 *door = GetRecordAddressDB0(dn);
-        if (door != NULL) { type = door->doorType(); orn = door->ornateness(); }
+        if (door != NULL)
+        {
+          type = door->doorType();
+          orn  = door->ornateness();
+          sw   = door->doorSwitch();
+        }
       }
       bridgeDoorX[bridgeDoorCount]    = (short)x;
       bridgeDoorY[bridgeDoorCount]    = (short)y;
       bridgeDoorType[bridgeDoorCount] = (short)type;
       bridgeDoorOrn[bridgeDoorCount]  = (short)orn;
+      bridgeDoorSw[bridgeDoorCount]   = (short)sw;
       bridgeDoorCount++;
     }
   bridgeDoorLevel = (int)d.LoadedLevel;
@@ -1367,11 +1383,14 @@ static void BuildDoorCache(void)
 // 4 campi (x,y,state,type); qui l'informazione statica in piu', letta una volta.
 static void EmitDoorOrnText(FILE *ft)
 {
+  // 4 campi per porta: x, y, ornateness, doorSwitch (il viewer 3D costruisce
+  // il pomello sullo stipite solo dove doorSwitch=1)
   if (bridgeDoorLevel != (int)d.LoadedLevel) BuildDoorCache();
   fprintf(ft, "%d\n", bridgeDoorCount);
   for (int i = 0; i < bridgeDoorCount; i++)
-    fprintf(ft, "%d\n%d\n%d\n",
-            (int)bridgeDoorX[i], (int)bridgeDoorY[i], (int)bridgeDoorOrn[i]);
+    fprintf(ft, "%d\n%d\n%d\n%d\n",
+            (int)bridgeDoorX[i], (int)bridgeDoorY[i],
+            (int)bridgeDoorOrn[i], (int)bridgeDoorSw[i]);
 }
 
 static void EmitDoorsText(FILE *ft)
@@ -1626,6 +1645,62 @@ static int Bridge_InjectSlotClick(int slot)
   int px = (int)d.IconDisplay[slot + 8].pixelX + 8;
   int py = (int)d.IconDisplay[slot + 8].pixelY + 8 + 33;  // viewport a y=33
   OnMouseClick(px, py, 2);   // 2 = tasto sinistro (btn.button)
+  return 1;
+}
+
+// ---- comando "DOORBTN": pomello della porta davanti al party ----------------
+// Click sintetico al centro di ViewportObjectButtons[5], la regione che il
+// renderer 2D riserva al pomello quando la cella davanti e' una porta con
+// doorSwitch. Le guardie vere (HandChar, EmptyHanded, doorSwitch, TT_DOOR)
+// le fa il dispatch ufficiale in Mouse.cpp:1053-1087, come per GRAB/RRC.
+static int Bridge_InjectDoorSwitch(void)
+{
+  if (d.CellTypeJustAhead != roomDOORFACING) return 0;
+  int x = ((int)d.ViewportObjectButtons[5].x1 + (int)d.ViewportObjectButtons[5].x2) / 2;
+  int y = ((int)d.ViewportObjectButtons[5].y1 + (int)d.ViewportObjectButtons[5].y2) / 2 + 33;
+  if (x <= 0 || y <= 33) return 0;   // regione non popolata dal renderer
+  OnMouseClick(x, y, 2);             // 2 = tasto sinistro
+  return 1;
+}
+
+// ---- comando "PICKUP <r 0..3>": raccogli l'oggetto a terra della regione r --
+// r = 0/1 cella del party sx/dx, 2/3 cella davanti sx/dx. Click sintetico al
+// centro di ViewportObjectButtons[r], la regione che il renderer 2D riserva
+// agli oggetti a terra visibili: il dispatch ufficiale (Mouse.cpp:1096-1135
+// -> TAG01a148) fa le guardie (mano vuota, HandChar) e prende l'oggetto in
+// cima alla pila del quadrante. Stessa filosofia di DOORBTN/GRAB/RRC.
+static int Bridge_InjectFloorPick(int r)
+{
+  if (r < 0 || r > 3) return 0;
+  int x = ((int)d.ViewportObjectButtons[r].x1 + (int)d.ViewportObjectButtons[r].x2) / 2;
+  int y = ((int)d.ViewportObjectButtons[r].y1 + (int)d.ViewportObjectButtons[r].y2) / 2 + 33;
+  if (x <= 0 || y <= 33) return 0;   // regione non popolata (oggetto non visibile nel 2D)
+  OnMouseClick(x, y, 2);             // 2 = tasto sinistro
+  return 1;
+}
+
+// ---- comandi "DROP <z 0..3>" / "THROW <lato 0..1>": posa/lancio -------------
+// DROP: click sintetico al centro di d.DropAreas[z], rettangoli FISSI in
+// coordinate schermo caricati dai dati di gioco: z=0/1 cella party sx/dx,
+// 2/3 cella davanti sx/dx -> DropObject(z) via dispatch ufficiale
+// (Mouse.cpp:1236-1249; col muro davanti il 2D accetta solo 0/1).
+// THROW: click nella fascia di lancio di TestThrow (y 47..102): x=111 =
+// colonna interna sinistra (lato 0), x=163 = interna destra (lato 1) ->
+// ThrowObjectInHand. Guardie (mano piena, HandChar, porta) nel motore.
+static int Bridge_InjectDrop(int z)
+{
+  if (z < 0 || z > 3) return 0;
+  int x = ((int)d.DropAreas[4*z+0] + (int)d.DropAreas[4*z+1]) / 2;
+  int y = ((int)d.DropAreas[4*z+2] + (int)d.DropAreas[4*z+3]) / 2;
+  if (x <= 0) return 0;
+  OnMouseClick(x, y, 2);             // 2 = tasto sinistro
+  return 1;
+}
+
+static int Bridge_InjectThrow(int side)
+{
+  if (side < 0 || side > 1) return 0;
+  OnMouseClick(side ? 163 : 111, 75, 2);
   return 1;
 }
 
@@ -2463,6 +2538,12 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
     if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
     else BridgeSrv_QueueFramed(c, "OK", EmitFloorText);
   }
+  else if (strcmp(line, "OBJNAMES") == 0)
+  {
+    // tabella statica objectNameIndex -> nome (per le mesh del viewer)
+    if (!bridgeLevelReady) BridgeSrv_Queue(c, "ERR nolevel\n", 12);
+    else BridgeSrv_QueueFramed(c, "OK", EmitObjNamesText);
+  }
   else if (strcmp(line, "FLOORP") == 0)
   {
     // come FLOOR ma con header "FLOOR <n>": il client la riconosce anche in
@@ -2590,6 +2671,41 @@ static void BridgeSrv_HandleLine(BridgeClient *c, char *line)
     int slot = atoi(line + 5);
     if (!bridgeLevelReady || !Bridge_InjectSlotClick(slot))
       BridgeSrv_Queue(c, "ERR badgrab\n", 12);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "PICKUP ", 7) == 0)
+  {
+    // raccogli oggetto a terra (regione 0..3): iniezione click come DOORBTN
+    int r = atoi(line + 7);
+    if (!bridgeLevelReady || !Bridge_InjectFloorPick(r))
+      BridgeSrv_Queue(c, "ERR badpick\n", 12);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "DROP ", 5) == 0)
+  {
+    // posa l'oggetto in mano nella zona z (0..3): iniezione click DropAreas
+    int z = atoi(line + 5);
+    if (!bridgeLevelReady || !Bridge_InjectDrop(z))
+      BridgeSrv_Queue(c, "ERR baddrop\n", 12);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strncmp(line, "THROW ", 6) == 0)
+  {
+    // lancia l'oggetto in mano in avanti (lato 0=sx 1=dx)
+    int t = atoi(line + 6);
+    if (!bridgeLevelReady || !Bridge_InjectThrow(t))
+      BridgeSrv_Queue(c, "ERR badthrow\n", 13);
+    else
+      BridgeSrv_Queue(c, "OK 0\n", 5);
+  }
+  else if (strcmp(line, "DOORBTN") == 0)
+  {
+    // pomello della porta davanti (apre/chiude): iniezione click regione 5
+    if (!bridgeLevelReady || !Bridge_InjectDoorSwitch())
+      BridgeSrv_Queue(c, "ERR badbtn\n", 11);
     else
       BridgeSrv_Queue(c, "OK 0\n", 5);
   }

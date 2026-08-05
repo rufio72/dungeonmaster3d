@@ -24,6 +24,14 @@ SetBuffer BackBuffer()
 
 Const CELL# = 4.0          ; unita' 3D per cella della griglia
 Const EYE#  = 2.0          ; altezza occhi camera
+; vista leggermente "dall'alto": pitch fisso in giu' + zoom un filo piu' largo
+; + arretramento maggiore (vedi MoveEntity nel loop). Insieme portano il bordo
+; basso dello schermo a ~46 gradi sotto l'orizzonte: gli oggetti a terra sulla
+; PROPRIA cella (mela, pane) si vedono interi; da soli i tre ritocchi non si
+; notano quasi. Tarare qui se serve.
+Const CAMPIT# = 6.0        ; pitch fisso verso il basso (gradi)
+Const CAMZOOM# = 0.90      ; zoom camera (1.0 = default; meno = FOV piu' ampio)
+Const CAMBACK# = 0.30      ; arretramento nella cella (frazione di CELL; era 0.20)
 Const SMOOTH# = 0.15       ; interpolazione camera (piu basso = piu fluido tra gli step)
 
 Const NPORT = 24           ; ritratti dei campioni: portraits/00.png .. portraits/23.png
@@ -233,9 +241,32 @@ Dim pliV(31)                      ; appoggio di ParseInts (numeri estratti da un
 Const FLOBJ_MAX = 96              ; max decal oggetto vivi contemporaneamente
 Const FLOBJ_HW# = CELL*0.16       ; mezzo-lato del decal (~32% del tile)
 Dim floTex(255)                   ; cache texture per objNI (0 = non caricata)
+Dim objName$(255)                 ; nome motore per objNI (payload OBJNAMES)
 Dim floEnt(FLOBJ_MAX-1)           ; entity dei decal correnti
 Dim floKey(FLOBJ_MAX-1)           ; cella+quadrante (per impilare senza z-fight)
 Global floN = 0                   ; decal attualmente vivi
+; --- proiettile del LANCIO (THROW): l'oggetto vola dal party al punto in cui
+; atterra invece di teletrasportarsi. ThrowPrep al click; spawn quando lo
+; STATE conferma la mano svuotata; BuildFloorObjs aggancia l'oggetto atterrato
+; (stesso NI, avanti lungo la traiettoria) e lo tiene nascosto fino all'arrivo.
+Global prjPendNI = -1             ; NI in attesa di conferma (THROW inviato)
+Global prjPendMs = 0
+Global prjPendX#, prjPendZ#, prjPendDX#, prjPendDZ#
+Global prjEnt = 0                 ; entity del proiettile in volo (0 = nessuno)
+Global prjIsMesh = 0, prjNI = -1
+Global prjX#, prjY#, prjZ#        ; posizione corrente (mondo)
+Global prjSX#, prjSZ#             ; punto di partenza
+Global prjDX#, prjDZ#             ; direzione di volo (versore mondo)
+Global prjMs = 0
+Global prjTgt = 0                 ; 1 = atterraggio noto
+Global prjTX#, prjTY#, prjTZ#     ; punto d'atterraggio
+Global prjTgtKey = -1             ; cella+quadrante dell'oggetto atterrato
+Global prjTgtEnt = 0              ; entity (nascosta) dell'oggetto atterrato
+; oggetti in VERA geometria 3D (mela, pane, ...): prototipo nascosto per objNI,
+; istanziato con CopyEntity a ogni refresh (vedi FloorObjProto in dm3d_world.bb)
+Dim floMeshP(255)                 ; prototipo mesh per objNI (0 = billboard)
+Dim floMeshTry(255)               ; 1 = costruzione del prototipo gia' tentata
+Dim floIsMesh(FLOBJ_MAX-1)        ; 1 = mesh vera: il main loop NON la billboarda
 Global floorDirty = 1             ; serve un refresh degli oggetti a terra
 Global floorPending = 0           ; richiesta FLOORP in volo
 Global floorNextMs = 0            ; prossimo refresh periodico di sicurezza
@@ -277,6 +308,7 @@ Flip
 camera = CreateCamera()
 CameraViewport camera, 0, BARH, VIEW_W, 480  ; 3D sotto la barra HUD; a destra i comandi
 CameraRange camera, 0.1, 2000
+CameraZoom camera, CAMZOOM
 CameraClsColor camera, 0, 0, 0
 ; nebbia nera: piu' lontano = piu' scuro, fino al nero (look "buio" di DM)
 CameraFogMode camera, 1
@@ -353,15 +385,20 @@ EndIf
 ; grata liscia e una piena decorata). 0 = base liscia; >=1 = decoro (overlay DM).
 ; Comando DOORORN dedicato: blocchi (x, y, ornateness). Non tocca lo STATE caldo.
 Dim doorOrnAt(W*H)
-For i = 0 To W*H-1 : doorOrnAt(i) = 0 : Next
+Dim doorSwAt(W*H)                 ; 1 = porta con POMELLO (doorSwitch, bit 6 DB0)
+For i = 0 To W*H-1 : doorOrnAt(i) = 0 : doorSwAt(i) = 0 : Next
 If BridgeReq("DOORORN") >= 1 Then
 	odc = Int(brLine$(0)) : ok = 1
 	For m = 1 To odc
 		ax = Int(brLine$(ok))
 		ay = Int(brLine$(ok+1))
 		aor = Int(brLine$(ok+2))
-		ok = ok + 3
-		If ax >= 0 And ax < W And ay >= 0 And ay < H Then doorOrnAt(ay*W+ax) = aor
+		asw = Int(brLine$(ok+3))
+		ok = ok + 4
+		If ax >= 0 And ax < W And ay >= 0 And ay < H Then
+			doorOrnAt(ay*W+ax) = aor
+			doorSwAt(ay*W+ax) = asw
+		EndIf
 	Next
 EndIf
 
@@ -465,6 +502,10 @@ For y = 0 To H-1
 				ft = CreateCube()
 				ScaleEntity ft, CELL/2.0, 0.1, CELL/2.0
 				PositionEntity ft, wx, 0.0, wz
+				; PICKABILE: a mano piena il click sul pavimento decide la
+				; zona di POSA (DROP); a mano vuota il nome "floor:" si ignora
+				EntityPickMode ft, 3
+				NameEntity ft, "floor:" + x + ":" + y
 				If floortex <> 0 Then
 					EntityColor ft, 255, 255, 255
 					EntityTexture ft, floortex, 0, 0                       ; diffuse slot 0
@@ -511,6 +552,10 @@ For y = 0 To H-1
 				doorOpen#(idx)  = 0.0                        ; parte chiusa
 
 				BuildDoorFrame(wx, wz, thinX)               ; stipiti in pietra (statici)
+
+				; pomello marrone sullo stipite (porte con doorSwitch): statico,
+				; pickabile; il click manda "DOORBTN" al bridge (apre/chiude)
+				If doorSwAt(idx) = 1 Then BuildDoorButtons(wx, wz, thinX)
 
 				; door-cam di debug: memorizza la prima porta e una posa davanti.
 				If DOORCAM And firstDoorPiv = 0 Then
@@ -662,6 +707,14 @@ EndIf
 ; refresh asincrono (FLOORP, header "FLOOR <n>" riconosciuto nel drenaggio).
 ; Texture = icone vere degli oggetti affettate da gen_floorobj.py in
 ; floorobj/ni<NI>.png (ni<NI>_custom.png ha la precedenza, mai sovrascritto).
+; tabella NI -> nome (statica): serve alle mesh procedurali anche per oggetti
+; mai visti a terra (es. il proiettile di un lancio dall'inventario)
+If BridgeReq("OBJNAMES") >= 1 Then
+	onc = Int(brLine$(0))
+	For i = 1 To onc
+		If i-1 <= 255 Then objName$(i-1) = brLine$(i)
+	Next
+EndIf
 If BridgeReq("FLOOR") >= 1 Then BuildFloorObjs(W, H)
 
 ; ---------------------------------------------------- ritratti dei campioni
@@ -935,6 +988,19 @@ If BridgeReq("WALLDEC") >= 1 Then
 				If dir = 3 Then BuildWallGrate(cxw, hky, czw + hnear, 180)
 				Goto wdecNext
 			EndIf
+			; le MANETTE (tipo 36) in geometria 3D anche quando compaiono
+			; come decorazione random (stessa BuildWallManacles dei DEVICES)
+			If wdt = 36 Then
+				cxw# = (W-1-fx)*CELL
+				czw# = fy*CELL
+				hky# = EYE
+				hnear# = CELL/2.0 - 0.02
+				If dir = 0 Then BuildWallManacles(cxw + hnear, hky, czw, 90)
+				If dir = 1 Then BuildWallManacles(cxw - hnear, hky, czw, -90)
+				If dir = 2 Then BuildWallManacles(cxw, hky, czw - hnear, 0)
+				If dir = 3 Then BuildWallManacles(cxw, hky, czw + hnear, 180)
+				Goto wdecNext
+			EndIf
 			If wdecTex(wdt) = 0 Then
 				; asset EDITABILE: la versione ridipinta a mano vince sempre
 				cust$ = "walldec/t" + wdt + "_custom.png"
@@ -1000,6 +1066,19 @@ For i = 0 To devN-1
 		devSkip = 0
 		If wdt = 43 Then
 			If (portFace(fy*W+fx) And (1 Shl dir)) <> 0 Then devSkip = 1
+		EndIf
+		; le MANETTE del prigioniero (T=36) sono in vera geometria 3D: tavola
+		; inchiodata + staffe con catene e ceppi (BuildWallManacles)
+		If wdt = 36 Then
+			cxw# = (W-1-fx)*CELL
+			czw# = fy*CELL
+			hky# = EYE
+			hnear# = CELL/2.0 - 0.02
+			If dir = 0 Then BuildWallManacles(cxw + hnear, hky, czw, 90)
+			If dir = 1 Then BuildWallManacles(cxw - hnear, hky, czw, -90)
+			If dir = 2 Then BuildWallManacles(cxw, hky, czw - hnear, 0)
+			If dir = 3 Then BuildWallManacles(cxw, hky, czw + hnear, 180)
+			devSkip = 1
 		EndIf
 		If wdt <> 2 And wdt <> 59 And devSkip = 0 Then
 			cxw# = (W-1-fx)*CELL
@@ -1174,6 +1253,12 @@ While 1
 						If pcSel > 0 And newHandNI <> hcHandNI Then needSheet = 1
 						; presa/posa: puo' essere sparito/apparso un oggetto a terra
 						If newHandNI <> hcHandNI Then floorDirty = 1
+						; lancio confermato: la mano si e' appena svuotata dopo
+						; un THROW -> parte il proiettile 3D verso l'atterraggio
+						If prjPendNI >= 0 And newHandNI < 0 And hcHandNI >= 0 Then
+							If MilliSecs() - prjPendMs < 1500 Then SpawnThrowProj()
+							prjPendNI = -1
+						EndIf
 						hcHandNI = newHandNI
 						; stato spell del caster (5 righe in coda, barra magie)
 						If sk + 10 <= pn - 1 Then
@@ -1289,11 +1374,13 @@ While 1
 	idleRol# = Sin(t*26.0 + 130) * 0.28 * idleK
 
 	PositionEntity camera, cx + swayX, cy + bobY, cz + swayZ
-	RotateEntity camera, idlePit, cyaw + idleYaw, idleRol
+	RotateEntity camera, CAMPIT + idlePit, cyaw + idleYaw, idleRol
 	; arretra la camera DIETRO lo sguardo, nel suo spazio LOCALE: cosi' l'offset di
 	; arretramento RUOTA sempre insieme alla vista (MoveEntity = relativo all'orienta-
 	; mento della camera, non al mondo). Verso il bordo posteriore della cella.
-	MoveEntity camera, 0, 0, -CELL * 0.20
+	; (col pitch fisso l'arretramento locale alza anche la camera di ~sin(CAMPIT)
+	; *offset ~ 0.13: trascurabile e voluto, aiuta a vedere il pavimento)
+	MoveEntity camera, 0, 0, -CELL * CAMBACK
 
 	; door-cam di debug: ignora il party e inquadra la prima porta del livello
 	If DOORCAM And firstDoorPiv <> 0 Then
@@ -1325,6 +1412,41 @@ While 1
 	fvar# = torchFlare * 0.04                   ; 0..0.04 -> tetto +4%
 	LightColor light, 255, 235*(1.0+fvar), 210*(1.0+fvar)   ; bianco caldo (piu' chiaro)
 	LightRange light, CELL * 6.6 * (1.0 + fvar)            ; +10% intensita' torcia; brillantezza +<=4% in fiammata
+
+	; oggetti a terra: lastre VERTICALI sempre rivolte verso la camera
+	; (billboard ad asse Y: solo yaw, restano in piedi). Le mesh vere
+	; (mela, pane) hanno yaw fisso e NON vanno ruotate.
+	For fj = 0 To floN-1
+		If floEnt(fj) <> 0 And floIsMesh(fj) = 0 Then RotateEntity floEnt(fj), 0, cyaw + 180, 0
+	Next
+
+	; proiettile del LANCIO in volo: avanza lungo la traiettoria; quando
+	; l'atterraggio e' noto (BuildFloorObjs ha visto l'oggetto arrivato)
+	; scende sul punto e li' mostra l'oggetto vero nascosto finora.
+	If prjEnt <> 0 Then
+		spd# = CELL * 4.5 / 60.0             ; ~4.5 celle al secondo
+		prjX = prjX + prjDX*spd
+		prjZ = prjZ + prjDZ*spd
+		If prjTgt = 1 Then
+			dtot# = Abs((prjTX-prjSX)*prjDX + (prjTZ-prjSZ)*prjDZ)
+			dcur# = Abs((prjX-prjSX)*prjDX + (prjZ-prjSZ)*prjDZ)
+			If dtot < 0.001 Then dtot = 0.001
+			pp# = dcur/dtot : If pp > 1 Then pp = 1
+			prjY = 1.5 + (prjTY - 1.5)*pp*pp ; discesa tardiva (parabola)
+			If dcur >= dtot Then ThrowProjEnd()
+		Else
+			; atterraggio mai visto (fossa/teleporter/altro livello): dissolvi
+			If MilliSecs() - prjMs > 2500 Then ThrowProjEnd()
+		EndIf
+		If prjEnt <> 0 Then
+			PositionEntity prjEnt, prjX, prjY, prjZ
+			If prjIsMesh = 0 Then
+				RotateEntity prjEnt, 0, cyaw + 180, 0   ; billboard come a terra
+			Else
+				TurnEntity prjEnt, 0, 9, 0              ; la mesh rotea in volo
+			EndIf
+		EndIf
+	EndIf
 	RenderWorld
 
 	; barra azioni nera a destra (il viewport 3D copre solo VIEW_W a sinistra)
@@ -1395,7 +1517,70 @@ While 1
 			; CameraPick vuole coordinate RELATIVE al viewport (l'engine divide
 			; per vp_w/vp_h senza sottrarre l'origine): tolta la barra in alto
 			pk = CameraPick(camera, cmx, cmy - BARH)
-			If pk <> 0 Then
+			If hcHandNI >= 0 Then
+				; --------- MANO PIENA: POSA sul pavimento vicino o LANCIO ---------
+				; cella+quadrante dal punto colpito: piastrella "floor:x:y" (quadrante
+				; dal punto esatto del pick) oppure oggetto gia' a terra "flobj:x:y:p"
+				dgx = -1 : dgy = 0 : dfp = 0
+				If pk <> 0 Then
+					nm$ = EntityName(pk)
+					If Left$(nm$, 6) = "floor:" Then
+						rest$ = Mid$(nm$, 7)
+						c1 = Instr(rest$, ":")
+						dgx = Int(Left$(rest$, c1-1))
+						dgy = Int(Mid$(rest$, c1+1))
+						; quadrante assoluto dal punto colpito (griglia: x=est y=sud;
+						; est = worldX DECRESCENTE, mondo specchiato su X)
+						oxg# = -(PickedX() - (W-1-dgx)*CELL)
+						oyg# = PickedZ() - dgy*CELL
+						dfp = 0
+						If oxg >= 0 And oyg <  0 Then dfp = 1
+						If oxg >= 0 And oyg >= 0 Then dfp = 2
+						If oxg <  0 And oyg >= 0 Then dfp = 3
+					ElseIf Left$(nm$, 6) = "flobj:" Then
+						rest$ = Mid$(nm$, 7)
+						c1 = Instr(rest$, ":")
+						c2 = Instr(rest$, ":", c1+1)
+						dgx = Int(Left$(rest$, c1-1))
+						dgy = Int(Mid$(rest$, c1+1, c2-c1-1))
+						dfp = Int(Mid$(rest$, c2+1))
+					EndIf
+				EndIf
+				act = -1
+				If dgx >= 0 Then
+					; zona di posa se la cella e' la propria o quella davanti
+					act = FloorPickRegion(dgx, dgy, dfp, px, py, pf)
+					If act < 0 Then
+						; pavimento OLTRE la cella davanti (>=2 celle lungo il
+						; facing): il click diventa un LANCIO in quella direzione
+						fdx = 0 : fdy = 0
+						If pf = 0 Then fdy = -1
+						If pf = 1 Then fdx = 1
+						If pf = 2 Then fdy = 1
+						If pf = 3 Then fdx = -1
+						If (dgx-px)*fdx + (dgy-py)*fdy >= 2 Then
+							act = 10 : If cmx > VIEW_W/2 Then act = 11
+						EndIf
+					EndIf
+				Else
+					; niente pavimento (muro/porta/buio): LANCIO ma solo nella
+					; fascia centrale del viewport (la banda di TestThrow del 2D:
+					; 47..102 su 136 -> in proporzione 48..245 su 480)
+					mvy = cmy - BARH
+					If mvy >= 48 And mvy <= 245 Then
+						act = 10 : If cmx > VIEW_W/2 Then act = 11
+					EndIf
+				EndIf
+				; guardie vere nel motore (porta chiusa, peso, HandChar, ...)
+				If act >= 10 And bridge <> 0 Then
+					WriteLine bridge, "THROW " + (act - 10)
+					; proiettile pronto: parte quando lo STATE svuota la mano
+					ThrowPrep(act - 10, px, py, pf, W)
+				ElseIf act >= 0 And bridge <> 0 Then
+					WriteLine bridge, "DROP " + act
+					prjPendNI = -1          ; una posa annulla il lancio pendente
+				EndIf
+			ElseIf pk <> 0 Then
 				nm$ = EntityName(pk)
 				If Left$(nm$, 6) = "champ:" Then
 					; solo da vicino, come nel 2D si clicca lo specchio davanti
@@ -1405,6 +1590,27 @@ While 1
 						If co >= 0 And co < NPORT And bridge <> 0 Then
 							WriteLine bridge, "MIRROR " + co
 						EndIf
+					EndIf
+				ElseIf nm$ = "doorbtn" Then
+					; pomello della porta: solo da vicino (porta davanti); il
+					; bridge rifa' comunque le guardie del 2D (doorSwitch, mano
+					; vuota, porta davanti) prima di iniettare il click
+					If EntityDistance(camera, pk) < CELL*2.2 And bridge <> 0 Then
+						WriteLine bridge, "DOORBTN"
+					EndIf
+				ElseIf Left$(nm$, 6) = "flobj:" Then
+					; oggetto a terra: raccolta SOLO a mano vuota (col pieno il
+					; 2D lancerebbe/poserebbe: quello e' un altro capitolo).
+					; Il motore rifa' comunque tutte le guardie.
+					If hcHandNI < 0 And bridge <> 0 Then
+						rest$ = Mid$(nm$, 7)
+						c1 = Instr(rest$, ":")
+						c2 = Instr(rest$, ":", c1+1)
+						ffx = Int(Left$(rest$, c1-1))
+						ffy = Int(Mid$(rest$, c1+1, c2-c1-1))
+						ffp = Int(Mid$(rest$, c2+1))
+						pr = FloorPickRegion(ffx, ffy, ffp, px, py, pf)
+						If pr >= 0 Then WriteLine bridge, "PICKUP " + pr
 					EndIf
 				EndIf
 			EndIf
@@ -1418,8 +1624,10 @@ While 1
 	; la VERA schermata dello specchio, pilotata dallo stato del 2D
 	If pcSel > 0 And invReady Then DrawInvPanel()
 
-	; cursore drag-and-drop SOPRA il pannello (oggetto in mano / manina in hover)
-	If pcSel > 0 And invReady Then DrawInvCursor()
+	; cursore drag-and-drop SOPRA il pannello (oggetto in mano / manina in hover);
+	; con un oggetto in mano il cursore-oggetto resta visibile ANCHE a pannello
+	; chiuso: raccogliendo dal pavimento il mouse "diventa" la mela/il pane
+	If (pcSel > 0 And invReady) Or hcHandNI >= 0 Then DrawInvCursor()
 
 	; pannello salvataggio sopra tutto (aperto dal floppy dell'inventario)
 	If savePanel Then DrawSavePanel()
